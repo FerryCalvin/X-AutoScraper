@@ -52,14 +52,14 @@
     <div class="max-w-4xl mx-auto px-4 py-8">
 
         <!-- Input Section -->
-        <div class="bg-white rounded-xl shadow-md p-6 mb-8 transition-transform hover:scale-[1.01] duration-300">
+        <div class="bg-white rounded-xl shadow-md p-6 mb-8">
             <h2 class="text-lg font-semibold mb-4 border-b pb-2">🚀 Start New Job</h2>
             <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
                 <div class="md:col-span-2">
                     <label class="block text-sm font-medium text-gray-700 mb-1">Search Keyword</label>
                     <input type="text" id="keyword"
                         class="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 outline-none"
-                        placeholder="e.g. banjir sumatra 2025">
+                        placeholder="e.g. banjir aceh, korban banjir, pemerintah lambat (Batch Input)">
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Count</label>
@@ -67,7 +67,25 @@
                         class="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 outline-none" value="100">
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">&nbsp;</label>
+                    <!-- Worker & Merge Settings -->
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Worker Mode ⚡</label>
+                    <select id="worker_mode"
+                        class="w-full p-2 border rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none mb-2">
+                        <option value="1">Safe (1 Worker) 🛡️</option>
+                        <option value="3" selected>Normal (3) 🚀</option>
+                        <option value="5">Aggressive (5) 🔥</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Row 2: Merge & Button -->
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <div class="flex items-center">
+                    <input type="checkbox" id="merge_batch" class="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                        checked>
+                    <label for="merge_batch" class="ml-2 text-sm text-gray-700">Merge Batch Results 🔗</label>
+                </div>
+                <div class="flex justify-end">
                     <button onclick="startJob()" id="btn-start"
                         class="w-full bg-blue-600 text-white p-2 rounded hover:bg-blue-700 transition flex justify-center items-center gap-2">
                         <i class="fa-solid fa-play"></i> Start Scraping
@@ -161,7 +179,9 @@
                         count: parseInt(count),
                         start_date: start_date,
                         end_date: end_date,
-                        smart_mode: smartMode
+                        smart_mode: smartMode,
+                        worker_mode: parseInt(workerMode),
+                        merge_batch: mergeBatch
                     })
                 });
 
