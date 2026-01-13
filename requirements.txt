@@ -1,0 +1,10 @@
+# Twitter Scraper Dependencies
+twscrape>=0.12.0          # Twitter scraper with account pool
+pydantic>=2.0.0           # Data validation & models
+rich>=13.0.0              # Beautiful console output
+python-dateutil>=2.8.0    # Date parsing
+aiosqlite>=0.19.0         # Async SQLite for twscrape
+selenium
+webdriver-manager
+flask
+
