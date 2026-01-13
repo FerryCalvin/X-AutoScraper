@@ -156,7 +156,11 @@
             const count = document.getElementById('count').value;
             const start_date = document.getElementById('start_date').value;
             const end_date = document.getElementById('end_date').value;
-            const smartMode = document.getElementById('smartMode').checked;
+            const smartMode = document.getElementById('smartMode') ? document.getElementById('smartMode').checked : false;
+
+            // Fix: Retrieve these values from DOM
+            const workerMode = document.getElementById('worker_mode').value;
+            const mergeBatch = document.getElementById('merge_batch') ? document.getElementById('merge_batch').checked : false;
 
             if (!keyword) {
                 alert('Please enter a keyword');

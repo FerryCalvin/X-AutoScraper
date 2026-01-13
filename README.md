@@ -6,8 +6,24 @@ Web Application untuk melakukan scraping data Twitter/X secara otomatis, menduku
 *   **Web Interface**: Mudah digunakan tanpa coding.
 *   **Parallel Scraping**: Menggunakan multiprocess untuk scraping ribuan tweet dalam hitungan detik.
 *   **Smart Search 🧠**: Otomatis menemukan hashtag terkait untuk memperluas pencarian.
-*   **Export CSV**: Siap untuk analisis data (SPSS/Python/Tableau).
+*   **Batch Input & Queue 📝**: Masukkan banyak keyword sekaligus (comma separated), sistem akan menjalankannya satu per satu secara otomatis.
+*   **Worker Settings 🛡️**: Pilihan mode aman (1 Worker) atau agresif (5 Workers).
+*   **Auto Merge 📦**: Opsi untuk menggabungkan hasil batch menjadi satu file CSV.
 *   **Rich Data**: Mengambil Likes, Retweets, Replies, Url, dan Timestamp.
+
+## ⚠️ Risiko & Mitigasi (PENTING) 🚨
+Aplikasi ini menggunakan teknik scraping yang powerful. Mohon perhatikan risiko berikut agar akun tetap aman:
+
+| Pemicu Ban (Triggers) | Risiko | Mitigasi Aplikasi Ini |
+| :--- | :--- | :--- |
+| **Speeding** (Ngebut) | Akun dikunci sementara | Random Delay (1.5 - 4.0 detik) simulasi manusia. |
+| **Pattern** (Pola Robot) | Terdeteksi Bot | Random Jitter (Waktu tidak pernah presisi). |
+| **Concurrency** (Keroyokan) | **Shadowban / Suspend** | Gunakan **Safe Mode (1 Worker)** untuk akun utama. |
+| **IP Reputation** | Blacklist IP | Gunakan Internet Rumah/HP. Hindari VPN Gratisan. |
+
+**Rekomendasi Mode:**
+*   **Demo Sidang / Akun Utama**: Gunakan **Safe Mode (1 Worker)**. Target < 500 tweet.
+*   **Panen Data Besar**: Gunakan **Normal (3 Workers)** dengan Akun Cadangan.
 
 ## 🛠️ Cara Install (Untuk Pengguna Lain)
 

@@ -4,6 +4,7 @@ import uuid
 import time
 import os
 import json
+import csv # Added for CSV operations
 import re # Added for Smart Mode regex
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
@@ -112,132 +113,215 @@ def update_job_status(job_id, status, progress=None, result_file=None):
     conn.commit()
     conn.close()
 
-def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, smart_mode=False):
+# Global Lock to prevent parallel execution (Anti-Shadowban)
+job_lock = threading.Semaphore(1)
+
+# Batch Tracking
+BATCH_GROUPS = {} # { batch_id: { 'total': N, 'completed': 0, 'files': [], 'lock': Lock() } }
+BATCH_LOCK = threading.Lock()
+
+def check_batch_completion(batch_id):
+    """Check if all jobs in a batch are done and merge them"""
+    with BATCH_LOCK:
+        if batch_id not in BATCH_GROUPS:
+            return
+            
+        group = BATCH_GROUPS[batch_id]
+        if group['completed'] == group['total']:
+            print(f"📦 Batch {batch_id} fully completed! Merging {len(group['files'])} files...")
+            
+            # Merge Logic
+            all_data = []
+            valid_files = [f for f in group['files'] if f and os.path.exists(f)]
+            
+            for fpath in valid_files:
+                try:
+                    # Determine format (JSON or CSV) - mostly CSV now
+                    if fpath.endswith('.json'):
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            all_data.extend(json.load(f))
+                    elif fpath.endswith('.csv'):
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            reader = csv.DictReader(f)
+                            all_data.extend(list(reader))
+                except Exception as e:
+                    print(f"Error reading {fpath} for merge: {e}")
+            
+            if all_data:
+                # Save Merged File
+                merged_filename = f"batch_merged_{int(time.time())}_{batch_id[:8]}.csv"
+                merged_path = os.path.join(OUTPUT_DIR, merged_filename)
+                
+                # Write CSV
+                if all_data:
+                    keys = all_data[0].keys()
+                    with open(merged_path, 'w', newline='', encoding='utf-8') as f:
+                        writer = csv.DictWriter(f, fieldnames=keys)
+                        writer.writeheader()
+                        writer.writerows(all_data)
+                
+                print(f"✅ Merged file ready: {merged_path}")
+                
+                # Add a "System Job" to DB so it shows in UI
+                conn = get_db()
+                c = conn.cursor()
+                sys_job_id = f"batch-{batch_id[:8]}"
+                c.execute(
+                    "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress, filename) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (sys_job_id, "📦 MATCH MERGED RESULT", len(all_data), 'COMPLETED', datetime.now(), f'Merged {len(valid_files)} files', merged_filename)
+                )
+                conn.commit()
+                conn.close()
+                
+            # Cleanup
+            del BATCH_GROUPS[batch_id]
+
+
+def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, smart_mode=False, worker_mode=3, batch_id=None):
     """Background worker thread"""
-    print(f"🧵 [Thread] Starting job {job_id} for '{keyword}' (Smart: {smart_mode})")
-    
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE jobs SET status = ? WHERE id = ?", ('RUNNING', job_id))
-    conn.commit()
-    conn.close()
-
-    try:
-        final_keyword = keyword
+    with job_lock: # Wait for other jobs to finish before starting
+        print(f"🧵 [Thread] Starting job {job_id} for '{keyword}' (Smart: {smart_mode}, Workers: {worker_mode})")
         
-        # --- SMART MODE LOGIC ---
-        if smart_mode:
-            # 1. Update status
-            update_job_status(job_id, 'RUNNING (Discovery Phase 🕵️)')
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE jobs SET status = ? WHERE id = ?", ('RUNNING', job_id))
+        conn.commit()
+        conn.close()
+
+        filename_abs = None # Initialize
+
+        try:
+            final_keyword = keyword
             
-            # 2. Discovery Scrape (Small batch)
-            print(f"🧠 Smart Mode: Scanning for topics related to '{keyword}'...")
-            discovery_tweets = scraper_selenium.scrape_twitter(
-                keyword, 
-                count=20, # Small sample
-                headless=True
-            )
-            
-            # 3. Analyze Hashtags
-            if discovery_tweets:
-                all_hashtags = []
-                for t in discovery_tweets:
-                    # Extract hashtags manually if not present in dict yet (safety)
-                    tags = re.findall(r'#\w+', t.get('text', ''))
-                    all_hashtags.extend(tags)
+            # --- SMART MODE LOGIC ---
+            if smart_mode:
+                # 1. Update status
+                update_job_status(job_id, 'RUNNING (Discovery Phase 🕵️)')
                 
-                # Top 3 Hashtags
-                from collections import Counter
-                top_tags = [tag for tag, _ in Counter(all_hashtags).most_common(3)]
+                # 2. Discovery Scrape (Small batch)
+                print(f"🧠 Smart Mode: Scanning for topics related to '{keyword}'...")
+                discovery_tweets = scraper_selenium.scrape_twitter(
+                    keyword, 
+                    count=20, # Small sample
+                    headless=True
+                )
                 
-                if top_tags:
-                    # 4. Expansion
-                    # Create query: "banjir OR #banjiraceh OR #aceh"
-                    additional_query = " OR ".join(top_tags)
-                    final_keyword = f"{keyword} OR {additional_query}"
-                    print(f"🧠 Smart Mode: Expanded keyword to -> {final_keyword}")
+                # 3. Analyze Hashtags
+                if discovery_tweets:
+                    all_hashtags = []
+                    for t in discovery_tweets:
+                        # Extract hashtags manually if not present in dict yet (safety)
+                        tags = re.findall(r'#\w+', t.get('text', ''))
+                        all_hashtags.extend(tags)
                     
-                    # Update status to show expansion
-                    update_job_status(job_id, f'RUNNING (Expanded: {final_keyword})')
-        # ------------------------
-
+                    # Top 3 Hashtags
+                    from collections import Counter
+                    top_tags = [tag for tag, _ in Counter(all_hashtags).most_common(3)]
+                    
+                    if top_tags:
+                        # 4. Expansion
+                        # Create query: "banjir OR #banjiraceh OR #aceh"
+                        additional_query = " OR ".join(top_tags)
+                        final_keyword = f"{keyword} OR {additional_query}"
+                        print(f"🧠 Smart Mode: Expanded keyword to -> {final_keyword}")
+                        
+                        # Update status to show expansion
+                        update_job_status(job_id, f'RUNNING (Expanded: {final_keyword})')
+            # ------------------------
     
-        # Callback to update DB
-        def on_progress(msg):
-            update_job_status(job_id, 'RUNNING', msg)
         
-        # Determine strategy based on count
-        if count > 500:
-            print(f"🚀 Using Parallel Strategy for {count} tweets")
-            update_job_status(job_id, 'RUNNING', f'Running parallel scraper (Target: {count})')
+            # Callback to update DB
+            def on_progress(msg):
+                update_job_status(job_id, 'RUNNING', msg)
             
-            # Run Parallel (3 workers default, could be dynamic)
-            # Make sure to handle potential import errors
-            try:
-                # If start_date is not provided for parallel, it defaults inside the function
-                # But if provided, we pass it.
-                kwargs = {
-                    "keyword": final_keyword, # Use final_keyword here
-                    "total_count": count,
-                    "workers": 5 if count >= 2000 else 3,
-                    "output_dir": OUTPUT_DIR
-                }
-                if start_date: kwargs["start_date"] = start_date
-                if end_date: kwargs["end_date"] = end_date # need to update scraper_parallel to accept end_date if not present
+            # Determine strategy based on count AND worker_mode
+            # If Safe Mode (1 worker), we prefer Standard Scraper UNLESS count is very high, 
+            # then we use Parallel with 1 worker to avoid memory leaks.
+            # But Standard Scraper is most "human-like".
+            
+            use_parallel = count > 500 or worker_mode > 1
+            
+            if use_parallel:
+                workers = worker_mode
+                print(f"🚀 Using Parallel Strategy for {count} tweets (Workers: {workers})")
+                update_job_status(job_id, 'RUNNING', f'Running parallel scraper ({workers} workers)')
+                
+                try:
+                    kwargs = {
+                        "keyword": final_keyword, # Use final_keyword here
+                        "total_count": count,
+                        "workers": workers,
+                        "output_dir": OUTPUT_DIR
+                    }
+                    if start_date: kwargs["start_date"] = start_date
+                    if end_date: kwargs["end_date"] = end_date 
 
-                filename_abs = scraper_parallel.run_parallel_job(**kwargs)
-            except Exception as e:
-                print(f"Parallel scraper error: {e}")
-                raise e
-
+                    filename_abs = scraper_parallel.run_parallel_job(**kwargs)
+                except Exception as e:
+                    print(f"Parallel scraper error: {e}")
+                    raise e
+                    
+            else:
+                # Standard Scraper (Safe Mode for small/medium counts)
+                print(f"🐢 Using Standard Strategy for {count} tweets")
+                update_job_status(job_id, 'RUNNING', 'Starting browser (Safe Mode)...')
+                
+                # Append dates to keyword for standard scraper logic (Twitter search syntax)
+                search_query = final_keyword
+                if start_date:
+                    search_query += f" since:{start_date}"
+                if end_date:
+                    search_query += f" until:{end_date}"
+                
+                # Define output filename
+                filename_abs = f"{os.getcwd()}/{OUTPUT_DIR}/job_{job_id}_{keyword.replace(' ', '_')}.json"
+                
+                # Run Standard with Callback
+                tweets = scraper_selenium.scrape_twitter(
+                    keyword=search_query, 
+                    count=count, 
+                    headless=True,
+                    output_filename=filename_abs,
+                    progress_callback=on_progress
+                )
+                
             result_tweets_count = 0 
             if filename_abs and os.path.exists(filename_abs):
+                # Simple check of count
                 try:
-                    with open(filename_abs, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        result_tweets_count = len(data)
+                    if filename_abs.endswith('.json'):
+                        with open(filename_abs, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            result_tweets_count = len(data)
+                    # Parallel strategy might return CSV path now? check implementation
+                    # Usually scraper_parallel returns JSON path so far.
                 except: pass
                 
             # Clean up filename for DB (just basename)
             if filename_abs:
                 filename = os.path.basename(filename_abs).replace('.json', '.csv')
-                
-        else:
-            print(f"🐢 Using Standard Strategy for {count} tweets")
-            update_job_status(job_id, 'RUNNING', 'Starting browser...')
-            
-            # Append dates to keyword for standard scraper logic (Twitter search syntax)
-            search_query = final_keyword
-            if start_date:
-                search_query += f" since:{start_date}"
-            if end_date:
-                search_query += f" until:{end_date}"
-            
-            # Define output filename
-            filename_abs = f"{os.getcwd()}/{OUTPUT_DIR}/job_{job_id}_{keyword.replace(' ', '_')}.json"
-            
-            # Run Standard with Callback
-            tweets = scraper_selenium.scrape_twitter(
-                keyword=search_query, 
-                count=count, 
-                headless=True,
-                output_filename=filename_abs,
-                progress_callback=on_progress
-            )
-            
-            result_tweets_count = len(tweets) if tweets else 0
-            # Prefer CSV for download
-            filename = os.path.basename(filename_abs).replace('.json', '.csv')
+            else:
+                filename = None
         
-        # Update Final Status
-        if result_tweets_count > 0:
-            update_job_status(job_id, 'COMPLETED', f'Found {result_tweets_count} tweets', filename)
-        else:
-            update_job_status(job_id, 'FAILED', 'No tweets found', None)
+            # Update Final Status
+            if result_tweets_count > 0:
+                update_job_status(job_id, 'COMPLETED', f'Found {result_tweets_count} tweets', filename)
+            else:
+                update_job_status(job_id, 'FAILED', 'No tweets found', None)
+                
+        except Exception as e:
+            print(f"❌ [Thread] Job {job_id} failed: {e}")
+            update_job_status(job_id, 'FAILED', str(e), None)
             
-    except Exception as e:
-        print(f"❌ [Thread] Job {job_id} failed: {e}")
-        update_job_status(job_id, 'FAILED', str(e), None)
+        finally:
+            # Batch Handling
+            if batch_id:
+                with BATCH_LOCK:
+                    if batch_id in BATCH_GROUPS:
+                        BATCH_GROUPS[batch_id]['completed'] += 1
+                        BATCH_GROUPS[batch_id]['files'].append(filename_abs) # Use absolute path
+                
+                check_batch_completion(batch_id)
 
 
 
@@ -248,33 +332,54 @@ def index():
 @app.route('/api/jobs', methods=['POST'])
 def create_job():
     data = request.json
-    keyword = data.get('keyword')
+    raw_keyword = data.get('keyword')
     count = int(data.get('count', 20))
     start_date = data.get('start_date')
     end_date = data.get('end_date')
     smart_mode = data.get('smart_mode', False)
+    worker_mode = int(data.get('worker_mode', 3)) # Default 3
+    merge_batch = data.get('merge_batch', False)
     
-    if not keyword:
+    if not raw_keyword:
         return jsonify({'error': 'Keyword is required'}), 400
         
-    job_id = str(uuid.uuid4())
+    # Handle Comma-Separated Keywords (Batch Mode)
+    keywords = [k.strip() for k in raw_keyword.split(',') if k.strip()]
     
-    # Save to DB
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)",
-        (job_id, keyword, count, 'PENDING', datetime.now(), 'Waiting to start...')
-    )
-    conn.commit()
-    conn.close()
+    created_jobs = []
     
-    # Start background thread
-    thread = threading.Thread(target=run_scraper_thread, args=(job_id, keyword, count, start_date, end_date, smart_mode))
-    thread.daemon = True
-    thread.start()
+    # Initialize Batch Group if merging is requested
+    batch_id = None
+    if merge_batch and len(keywords) > 1:
+        batch_id = str(uuid.uuid4())
+        with BATCH_LOCK:
+            BATCH_GROUPS[batch_id] = {
+                'total': len(keywords),
+                'completed': 0,
+                'files': []
+            }
     
-    return jsonify({'job_id': job_id, 'status': 'PENDING'})
+    for keyword in keywords:
+        job_id = str(uuid.uuid4())
+        
+        # Save to DB
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)",
+            (job_id, keyword, count, 'PENDING', datetime.now(), 'Queued (Waiting for slot...)')
+        )
+        conn.commit()
+        conn.close()
+        
+        # Start background thread
+        thread = threading.Thread(target=run_scraper_thread, args=(job_id, keyword, count, start_date, end_date, smart_mode, worker_mode, batch_id))
+        thread.daemon = True
+        thread.start()
+        
+        created_jobs.append(job_id)
+    
+    return jsonify({'job_ids': created_jobs, 'status': 'PENDING', 'message': f'Created {len(created_jobs)} jobs'})
 
 @app.route('/api/jobs', methods=['GET'])
 def list_jobs():
