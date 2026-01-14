@@ -6,12 +6,153 @@ import os
 import json
 import csv # Added for CSV operations
 import re # Added for Smart Mode regex
+import yaml # Config file support
+import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 
 # Import our scrapers
 import scraper_selenium
 import scraper_parallel
+
+# ===================
+# CONFIG LOADER
+# ===================
+def load_config():
+    """Load configuration from YAML file"""
+    config_path = 'config.yaml'
+    default_config = {
+        'scraper': {'default_count': 100, 'scroll_delay_min': 1.5, 'scroll_delay_max': 4.0},
+        'workers': {'default_mode': 3, 'parallel_threshold': 500},
+        'logging': {'enabled': True, 'file': 'logs/autoscraper.log', 'level': 'INFO'},
+        'output': {'directory': 'outputs', 'format': 'csv'},
+        'rate_limit': {'max_requests_per_minute': 30, 'warning_threshold': 20, 'danger_threshold': 25}
+    }
+    
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            print(f"⚠️ Error loading config: {e}. Using defaults.")
+            return default_config
+    return default_config
+
+CONFIG = load_config()
+
+# ===================
+# LOGGING SETUP
+# ===================
+def setup_logging():
+    """Setup file and console logging"""
+    log_config = CONFIG.get('logging', {})
+    
+    if not log_config.get('enabled', True):
+        return
+    
+    # Create logs directory
+    log_file = log_config.get('file', 'logs/autoscraper.log')
+    log_dir = os.path.dirname(log_file)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    # Setup rotating file handler
+    log_level = getattr(logging, log_config.get('level', 'INFO').upper(), logging.INFO)
+    max_bytes = log_config.get('max_size_mb', 10) * 1024 * 1024
+    backup_count = log_config.get('backup_count', 5)
+    
+    file_handler = RotatingFileHandler(
+        log_file, 
+        maxBytes=max_bytes, 
+        backupCount=backup_count,
+        encoding='utf-8'
+    )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s | %(levelname)s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    ))
+    
+    # Setup root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.addHandler(file_handler)
+    
+    # Also log to console
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(logging.Formatter('%(message)s'))
+    root_logger.addHandler(console_handler)
+    
+    logging.info("🚀 AutoScraper started - Logging initialized")
+
+setup_logging()
+
+# ===================
+# LIVE LOG BUFFER (for UI)
+# ===================
+LOG_BUFFER = []
+LOG_BUFFER_MAX = 100  # Keep last 100 log entries
+
+class BufferHandler(logging.Handler):
+    """Custom handler to store logs in memory for live viewing"""
+    def emit(self, record):
+        global LOG_BUFFER
+        log_entry = self.format(record)
+        LOG_BUFFER.append({
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'level': record.levelname,
+            'message': log_entry
+        })
+        # Keep buffer size limited
+        if len(LOG_BUFFER) > LOG_BUFFER_MAX:
+            LOG_BUFFER = LOG_BUFFER[-LOG_BUFFER_MAX:]
+
+# Add buffer handler
+buffer_handler = BufferHandler()
+buffer_handler.setFormatter(logging.Formatter('%(message)s'))
+logging.getLogger().addHandler(buffer_handler)
+
+# ===================
+# RATE LIMIT TRACKING
+# ===================
+REQUEST_TIMESTAMPS = []  # List of timestamps for rate calculation
+
+def track_request():
+    """Track a request for rate limiting meter"""
+    global REQUEST_TIMESTAMPS
+    now = time.time()
+    REQUEST_TIMESTAMPS.append(now)
+    # Keep only last minute of requests
+    REQUEST_TIMESTAMPS = [t for t in REQUEST_TIMESTAMPS if now - t < 60]
+
+def get_rate_status():
+    """Get current rate limit status"""
+    rate_config = CONFIG.get('rate_limit', {})
+    max_rpm = rate_config.get('max_requests_per_minute', 30)
+    warning = rate_config.get('warning_threshold', 20)
+    danger = rate_config.get('danger_threshold', 25)
+    
+    current_rpm = len(REQUEST_TIMESTAMPS)
+    
+    if current_rpm >= danger:
+        status = 'HOT'
+        color = 'red'
+    elif current_rpm >= warning:
+        status = 'WARM'
+        color = 'yellow'
+    else:
+        status = 'COOL'
+        color = 'green'
+    
+    return {
+        'current_rpm': current_rpm,
+        'max_rpm': max_rpm,
+        'status': status,
+        'color': color,
+        'percent': min(100, int((current_rpm / max_rpm) * 100))
+    }
 
 # Config File for Cookies
 COOKIE_FILE = 'cookies_config.json'
@@ -471,6 +612,61 @@ def list_jobs():
     conn.close()
     
     return jsonify([dict(job) for job in jobs])
+
+@app.route('/api/health-check', methods=['GET'])
+def health_check():
+    """Run account health check and return status"""
+    result = scraper_selenium.check_account_health()
+    return jsonify(result)
+
+@app.route('/api/logs', methods=['GET'])
+def get_logs():
+    """Get recent logs for live log viewer"""
+    return jsonify(LOG_BUFFER[-50:])  # Return last 50 entries
+
+@app.route('/api/rate-status', methods=['GET'])
+def rate_status():
+    """Get current rate limit meter status"""
+    return jsonify(get_rate_status())
+
+@app.route('/api/preview/<job_id>', methods=['GET'])
+def preview_data(job_id):
+    """Preview first 10 rows of a completed job"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT result_file FROM jobs WHERE id = ?", (job_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row or not row[0]:
+        return jsonify({'error': 'No data found'}), 404
+    
+    filename = row[0]
+    filepath = f"{OUTPUT_DIR}/{filename}"
+    
+    if not os.path.exists(filepath):
+        return jsonify({'error': 'File not found'}), 404
+    
+    preview_rows = []
+    try:
+        if filepath.endswith('.csv'):
+            with open(filepath, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for i, row in enumerate(reader):
+                    if i >= 10:
+                        break
+                    preview_rows.append(dict(row))
+        elif filepath.endswith('.json'):
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                preview_rows = data[:10]
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    return jsonify({
+        'total': len(preview_rows),
+        'preview': preview_rows
+    })
 
 @app.route('/download/<filename>')
 def download_file(filename):

@@ -39,8 +39,13 @@
             <div class="flex items-center space-x-3">
                 <h1 class="text-xl font-bold tracking-tight">AutoScraper <span class="text-blue-500"></span></h1>
             </div>
-            <div class="text-sm text-gray-500">
-                <span id="system-status" class="flex items-center space-x-2">
+            <div class="flex items-center space-x-4">
+                <button onclick="checkHealth()" id="btn-health"
+                    class="text-sm px-3 py-1 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center gap-1 transition">
+                    <i class="fa-solid fa-stethoscope text-green-600"></i>
+                    <span>Health Check</span>
+                </button>
+                <span id="system-status" class="flex items-center space-x-2 text-sm text-gray-500">
                     <span class="w-3 h-3 bg-green-500 rounded-full"></span>
                     <span>System Ready</span>
                 </span>
@@ -138,6 +143,40 @@
                     </tr>
                 </tbody>
             </table>
+        </div>
+
+        <!-- Rate Limit Meter -->
+        <div class="mt-6 bg-white rounded-xl shadow-md p-4">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-medium text-gray-700">🌡️ Rate Limit Meter</span>
+                <span id="rate-status"
+                    class="text-xs font-medium px-2 py-1 rounded bg-green-100 text-green-700">COOL</span>
+            </div>
+            <div class="w-full bg-gray-200 rounded-full h-3">
+                <div id="rate-bar" class="bg-green-500 h-3 rounded-full transition-all duration-300" style="width: 0%">
+                </div>
+            </div>
+            <div class="flex justify-between text-xs text-gray-500 mt-1">
+                <span id="rate-current">0 req/min</span>
+                <span id="rate-max">Max: 30 req/min</span>
+            </div>
+        </div>
+
+        <!-- Live Log Viewer -->
+        <div class="mt-6">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                    <i class="fa-solid fa-terminal text-gray-500"></i>
+                    Live Logs
+                </h3>
+                <button onclick="clearLogs()" class="text-xs text-gray-500 hover:text-red-500">
+                    <i class="fa-solid fa-trash"></i> Clear
+                </button>
+            </div>
+            <div id="log-viewer"
+                class="bg-gray-900 text-green-400 font-mono text-xs p-3 rounded-lg h-40 overflow-y-auto">
+                <div class="text-gray-500">Waiting for logs...</div>
+            </div>
         </div>
 
     </div>
@@ -244,8 +283,28 @@
                                 <span>${job.status}</span>
                             </span>
                         </td>
-                        <td class="px-6 py-4 text-sm text-gray-600">
-                            ${job.progress || '-'}
+                        <td class="px-6 py-4">
+                            ${(() => {
+                        // Extract progress numbers if available
+                        const progressMatch = (job.progress || '').match(/(\d+)\/(\d+)/);
+                        if (progressMatch && job.status === 'RUNNING') {
+                            const current = parseInt(progressMatch[1]);
+                            const total = parseInt(progressMatch[2]);
+                            const percent = Math.min(100, Math.round((current / total) * 100));
+                            return `
+                                        <div class="w-full">
+                                            <div class="flex justify-between text-xs text-gray-600 mb-1">
+                                                <span>${current}/${total}</span>
+                                                <span>${percent}%</span>
+                                            </div>
+                                            <div class="w-full bg-gray-200 rounded-full h-2">
+                                                <div class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: ${percent}%"></div>
+                                            </div>
+                                        </div>
+                                    `;
+                        }
+                        return `<span class="text-sm text-gray-600">${job.progress || '-'}</span>`;
+                    })()}
                         </td>
                         <td class="px-6 py-4 text-right">
                             ${job.status === 'COMPLETED' ?
@@ -262,9 +321,161 @@
             tbody.innerHTML = html;
         }
 
+        // Health Check Function
+        async function checkHealth() {
+            const btn = document.getElementById('btn-health');
+            const status = document.getElementById('system-status');
+
+            // Update UI to loading
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Checking...';
+            btn.disabled = true;
+            status.innerHTML = '<span class="w-3 h-3 bg-yellow-500 rounded-full animate-pulse"></span><span>Checking...</span>';
+
+            try {
+                const response = await fetch('/api/health-check');
+                const result = await response.json();
+
+                let color = 'green';
+                let icon = 'fa-check-circle';
+                let text = 'Healthy';
+
+                if (result.status === 'WARNING') {
+                    color = 'yellow';
+                    icon = 'fa-exclamation-triangle';
+                    text = 'Warning';
+                } else if (result.status === 'ERROR') {
+                    color = 'red';
+                    icon = 'fa-times-circle';
+                    text = 'Error';
+                }
+
+                status.innerHTML = `
+                    <span class="w-3 h-3 bg-${color}-500 rounded-full"></span>
+                    <span class="text-${color}-600 font-medium">${text}</span>
+                `;
+
+                // Show detailed result
+                let message = `🩺 Account Health: ${result.status}\n\n`;
+                message += `✓ Can Search: ${result.can_search ? 'Yes' : 'No'}\n`;
+                message += `✓ Can See Tweets: ${result.can_see_tweets ? 'Yes' : 'No'}\n\n`;
+                if (result.warnings.length > 0) {
+                    message += `⚠️ Warnings:\n${result.warnings.join('\n')}\n\n`;
+                }
+                message += `💡 ${result.recommendation}`;
+
+                alert(message);
+
+            } catch (error) {
+                status.innerHTML = '<span class="w-3 h-3 bg-red-500 rounded-full"></span><span class="text-red-600">Error</span>';
+                alert('Health check failed: ' + error.message);
+            } finally {
+                btn.innerHTML = '<i class="fa-solid fa-stethoscope text-green-600"></i> <span>Health Check</span>';
+                btn.disabled = false;
+            }
+        }
+
+        // ==================
+        // LIVE LOG VIEWER
+        // ==================
+        async function fetchLogs() {
+            try {
+                const response = await fetch('/api/logs');
+                const logs = await response.json();
+                const viewer = document.getElementById('log-viewer');
+
+                if (logs.length === 0) {
+                    viewer.innerHTML = '<div class="text-gray-500">Waiting for logs...</div>';
+                    return;
+                }
+
+                let html = '';
+                for (const log of logs) {
+                    const levelColor = log.level === 'ERROR' ? 'text-red-400' :
+                        log.level === 'WARNING' ? 'text-yellow-400' : 'text-green-400';
+                    html += `<div><span class="text-gray-500">[${log.time}]</span> <span class="${levelColor}">${log.message}</span></div>`;
+                }
+                viewer.innerHTML = html;
+                viewer.scrollTop = viewer.scrollHeight; // Auto-scroll to bottom
+            } catch (error) {
+                console.error('Log fetch error:', error);
+            }
+        }
+
+        function clearLogs() {
+            document.getElementById('log-viewer').innerHTML = '<div class="text-gray-500">Logs cleared.</div>';
+        }
+
+        // ==================
+        // RATE LIMIT METER
+        // ==================
+        async function fetchRateStatus() {
+            try {
+                const response = await fetch('/api/rate-status');
+                const data = await response.json();
+
+                // Update UI
+                document.getElementById('rate-status').textContent = data.status;
+                document.getElementById('rate-status').className = `text-xs font-medium px-2 py-1 rounded bg-${data.color}-100 text-${data.color}-700`;
+                document.getElementById('rate-bar').style.width = data.percent + '%';
+                document.getElementById('rate-bar').className = `bg-${data.color}-500 h-3 rounded-full transition-all duration-300`;
+                document.getElementById('rate-current').textContent = data.current_rpm + ' req/min';
+                document.getElementById('rate-max').textContent = 'Max: ' + data.max_rpm + ' req/min';
+            } catch (error) {
+                console.error('Rate status fetch error:', error);
+            }
+        }
+
+        // ==================
+        // DATA PREVIEW
+        // ==================
+        async function previewData(jobId) {
+            try {
+                const response = await fetch(`/api/preview/${jobId}`);
+                const data = await response.json();
+
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                    return;
+                }
+
+                // Simple table display
+                let previewHtml = '<table style="width:100%; border-collapse: collapse; font-size: 12px;">';
+                if (data.preview.length > 0) {
+                    // Headers
+                    previewHtml += '<tr>';
+                    for (const key of Object.keys(data.preview[0]).slice(0, 5)) {
+                        previewHtml += `<th style="border: 1px solid #ddd; padding: 4px; background: #f5f5f5;">${key}</th>`;
+                    }
+                    previewHtml += '</tr>';
+
+                    // Rows
+                    for (const row of data.preview) {
+                        previewHtml += '<tr>';
+                        for (const key of Object.keys(row).slice(0, 5)) {
+                            let val = String(row[key] || '').substring(0, 50);
+                            previewHtml += `<td style="border: 1px solid #ddd; padding: 4px;">${val}</td>`;
+                        }
+                        previewHtml += '</tr>';
+                    }
+                }
+                previewHtml += '</table>';
+
+                // Show in alert (simple approach)
+                const div = document.createElement('div');
+                div.innerHTML = previewHtml;
+                alert('Preview (first 10 rows, 5 columns):\n\n' + div.textContent);
+
+            } catch (error) {
+                alert('Preview failed: ' + error.message);
+            }
+        }
+
         // Auto refresh every 3 seconds
         setInterval(fetchJobs, 3000);
+        setInterval(fetchLogs, 2000);  // Logs refresh more frequently
+        setInterval(fetchRateStatus, 5000);  // Rate every 5 seconds
         fetchJobs(); // Initial fetch
+        fetchRateStatus(); // Initial rate fetch
     </script>
 </body>
 

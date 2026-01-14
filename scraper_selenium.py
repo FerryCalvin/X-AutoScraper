@@ -32,7 +32,25 @@ COOKIES_DICT = load_cookies()
 def setup_driver(headless=False):
     options = Options()
     if headless:
-        options.add_argument('--headless')
+        options.add_argument('--headless=new')  # New headless mode (faster)
+        
+        # === HEADLESS OPTIMIZATIONS ===
+        # Disable images (saves bandwidth and memory)
+        prefs = {
+            "profile.managed_default_content_settings.images": 2,
+            "profile.default_content_setting_values.notifications": 2,
+            "profile.managed_default_content_settings.stylesheets": 2,
+            "profile.managed_default_content_settings.fonts": 2,
+        }
+        options.add_experimental_option("prefs", prefs)
+        
+        # Additional memory optimizations
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-extensions')
+        options.add_argument('--disable-infobars')
+        options.add_argument('--memory-pressure-off')
+        options.add_argument('--single-process')
+        
     options.add_argument('--disable-gpu')
     options.add_argument('--no-sandbox')
     options.add_argument('--window-size=1920,1080')
@@ -46,6 +64,95 @@ def setup_driver(headless=False):
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
     return driver
+
+def check_account_health():
+    """
+    Check if the Twitter account is healthy (not shadowbanned or restricted).
+    Returns a dict with health status and details.
+    """
+    print("🩺 Checking account health...")
+    driver = setup_driver(headless=True)
+    
+    result = {
+        "status": "UNKNOWN",
+        "can_search": False,
+        "can_see_tweets": False,
+        "warnings": [],
+        "recommendation": ""
+    }
+    
+    try:
+        # 1. Navigate to Twitter
+        driver.get("https://x.com")
+        time.sleep(3)
+        
+        # 2. Inject cookies
+        if COOKIES_DICT:
+            for cookie_name, cookie_value in COOKIES_DICT.items():
+                if cookie_value:
+                    try:
+                        driver.add_cookie({
+                            "name": cookie_name,
+                            "value": cookie_value,
+                            "domain": ".x.com"
+                        })
+                    except: pass
+            driver.refresh()
+            time.sleep(3)
+        
+        # 3. Check if logged in (look for home timeline or compose button)
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "a[data-testid='SideNav_NewTweet_Button'], div[data-testid='tweetButtonInline']"))
+            )
+            print("   ✅ Login successful")
+        except:
+            result["status"] = "ERROR"
+            result["warnings"].append("Login failed - cookies may be expired")
+            result["recommendation"] = "Please update your cookies in cookies_config.json"
+            return result
+        
+        # 4. Try searching for a common term
+        driver.get("https://x.com/search?q=test&src=typed_query&f=live")
+        time.sleep(4)
+        
+        # 5. Check if search results appear
+        try:
+            articles = driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']")
+            if len(articles) > 0:
+                result["can_search"] = True
+                result["can_see_tweets"] = True
+                print(f"   ✅ Search works - found {len(articles)} tweets")
+            else:
+                # Check for "No results" message
+                no_results = driver.find_elements(By.XPATH, "//*[contains(text(), 'No results')]")
+                if no_results:
+                    result["warnings"].append("Search returned no results - possible shadowban")
+                else:
+                    result["warnings"].append("Could not load tweets - possible rate limit")
+        except Exception as e:
+            result["warnings"].append(f"Search test failed: {str(e)}")
+        
+        # 6. Determine overall status
+        if result["can_search"] and result["can_see_tweets"]:
+            result["status"] = "HEALTHY"
+            result["recommendation"] = "Account is healthy. Safe to scrape."
+        elif result["warnings"]:
+            result["status"] = "WARNING"
+            result["recommendation"] = "Account may have issues. Consider waiting 24h or using backup account."
+        else:
+            result["status"] = "UNKNOWN"
+            result["recommendation"] = "Could not determine status. Proceed with caution."
+            
+    except Exception as e:
+        result["status"] = "ERROR"
+        result["warnings"].append(str(e))
+        result["recommendation"] = "Health check failed. Check your internet connection."
+    finally:
+        driver.quit()
+    
+    print(f"🩺 Health Status: {result['status']}")
+    return result
 
 # ... (previous imports)
 import random

@@ -7,4 +7,9 @@ aiosqlite>=0.19.0         # Async SQLite for twscrape
 selenium
 webdriver-manager
 flask
+pyyaml                    # Config file support
+scikit-learn              # Topic modeling (LDA)
 
+# Optional: AI-powered sentiment (install separately if needed)
+# transformers            # IndoBERT sentiment (500MB download)
+# torch                   # PyTorch for transformers
