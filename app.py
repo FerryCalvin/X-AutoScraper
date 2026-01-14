@@ -364,7 +364,7 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
                 print(f"🧠 Smart Mode: Scanning for topics related to '{keyword}'...")
                 discovery_tweets = scraper_selenium.scrape_twitter(
                     keyword, 
-                    count=50, # Larger sample for better hashtag discovery (was 20)
+                    count=100, # INCREASED: Larger sample for better hashtag discovery (was 50)
                     headless=True
                 )
                 
@@ -377,9 +377,9 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
                         tags = re.findall(r'#\w+', original.lower())
                         all_hashtags.extend(tags)
                     
-                    # Top 5 Hashtags (more aggressive expansion)
+                    # Top 10 Hashtags (more aggressive expansion) - INCREASED from 5
                     from collections import Counter
-                    top_tags = [tag for tag, _ in Counter(all_hashtags).most_common(5)]
+                    top_tags = [tag for tag, _ in Counter(all_hashtags).most_common(10)]
                     
                     if top_tags:
                         # 4. Expansion
@@ -545,6 +545,35 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
             update_job_status(job_id, 'FAILED', str(e), None)
             
         finally:
+            # ==================
+            # AUTO-CLEANUP TEMP FILES
+            # ==================
+            try:
+                import glob
+                # Clean temp files from outputs directory
+                temp_patterns = [
+                    f"{OUTPUT_DIR}/temp_*.csv",
+                    f"{OUTPUT_DIR}/temp_*.json",
+                ]
+                for pattern in temp_patterns:
+                    for temp_file in glob.glob(pattern):
+                        try:
+                            os.remove(temp_file)
+                            print(f"🗑️ Cleaned up temp file: {temp_file}")
+                        except:
+                            pass
+                
+                # Clean chunked files from root directory (they should be in outputs)
+                root_chunks = glob.glob("chunked_*.csv")
+                for chunk_file in root_chunks:
+                    try:
+                        os.remove(chunk_file)
+                        print(f"🗑️ Cleaned up orphan chunk: {chunk_file}")
+                    except:
+                        pass
+            except Exception as cleanup_error:
+                print(f"⚠️ Cleanup warning: {cleanup_error}")
+            
             # Batch Handling
             if batch_id:
                 with BATCH_LOCK:

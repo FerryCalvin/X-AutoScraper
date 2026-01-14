@@ -166,25 +166,72 @@ def random_delay(min_sec=1.5, max_sec=4.0):
     time.sleep(random.uniform(min_sec, max_sec))
 
 import html
+import unicodedata
+
+def normalize_unicode_fonts(text):
+    """
+    Convert fancy Unicode fonts (Mathematical Bold, Script, etc.) to regular ASCII.
+    These are commonly used in Twitter for stylized text like 𝗕𝗼𝗹𝗱 𝗧𝗲𝘅𝘁.
+    """
+    if not text:
+        return text
+    
+    # Unicode block mappings for common styled fonts
+    # Mathematical Bold (𝗔-𝗭, 𝗮-𝘇, 𝟬-𝟵)
+    # Mathematical Sans-Serif Bold (𝗔-𝗭, 𝗮-𝘇)
+    result = []
+    for char in text:
+        code = ord(char)
+        
+        # Mathematical Bold Caps (𝐀-𝐙) -> A-Z
+        if 0x1D400 <= code <= 0x1D419:
+            result.append(chr(code - 0x1D400 + ord('A')))
+        # Mathematical Bold Small (𝐚-𝐳) -> a-z
+        elif 0x1D41A <= code <= 0x1D433:
+            result.append(chr(code - 0x1D41A + ord('a')))
+        # Mathematical Sans-Serif Bold Caps (𝗔-𝗭) -> A-Z
+        elif 0x1D5D4 <= code <= 0x1D5ED:
+            result.append(chr(code - 0x1D5D4 + ord('A')))
+        # Mathematical Sans-Serif Bold Small (𝗮-𝘇) -> a-z
+        elif 0x1D5EE <= code <= 0x1D607:
+            result.append(chr(code - 0x1D5EE + ord('a')))
+        # Mathematical Bold Digits (𝟎-𝟗) -> 0-9
+        elif 0x1D7CE <= code <= 0x1D7D7:
+            result.append(chr(code - 0x1D7CE + ord('0')))
+        # Mathematical Sans-Serif Bold Digits (𝟬-𝟵) -> 0-9  
+        elif 0x1D7EC <= code <= 0x1D7F5:
+            result.append(chr(code - 0x1D7EC + ord('0')))
+        # Fullwidth Latin (Ａ-Ｚ, ａ-ｚ) -> A-Z, a-z
+        elif 0xFF21 <= code <= 0xFF3A:
+            result.append(chr(code - 0xFF21 + ord('A')))
+        elif 0xFF41 <= code <= 0xFF5A:
+            result.append(chr(code - 0xFF41 + ord('a')))
+        else:
+            result.append(char)
+    
+    return ''.join(result)
 
 def clean_text(text):
-    """Start-of-the-art preprocessing"""
+    """Start-of-the-art preprocessing with Unicode normalization"""
     if not text: return ""
     
-    # 0. Decode HTML entities (&amp; -> &)
+    # 0. Normalize Unicode fancy fonts (𝗕𝗼𝗹𝗱 -> Bold)
+    text = normalize_unicode_fonts(text)
+    
+    # 1. Decode HTML entities (&amp; -> &)
     text = html.unescape(text)
     
-    # 1. Remove URLs
+    # 2. Remove URLs
     text = re.sub(r'http\S+', '', text)
     
-    # 2. Remove Mentions (@user)
+    # 3. Remove Mentions (@user)
     text = re.sub(r'@\w+', '', text)
     
-    # 3. Remove Emojis & Special Symbols (Keep only alphanumeric, punctuation, and basic latin)
+    # 4. Remove Emojis & Special Symbols (Keep only alphanumeric, punctuation, and basic latin)
     # This regex keeps letters, numbers, spaces, and basic punctuation
     text = re.sub(r'[^\w\s,.:;!?#"\'-]', '', text)
     
-    # 4. Remove extra whitespace
+    # 5. Remove extra whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     
     return text.lower() # Optional: Lowercase
