@@ -78,21 +78,12 @@
                 </div>
             </div>
 
-            <!-- Row 2: Combine Mode & Button -->
-            <div class="grid grid-cols-2 gap-4 mb-4">
-                <div class="flex items-center">
-                    <input type="checkbox" id="combine_mode"
-                        class="w-4 h-4 text-purple-600 rounded focus:ring-purple-500" checked>
-                    <label for="combine_mode" class="ml-2 text-sm text-gray-700">Combine Keywords (OR) 🔗</label>
-                    <span class="ml-2 text-xs text-gray-400"
-                        title="Gabungkan keyword menjadi satu job (misal: banjir OR gempa)">?</span>
-                </div>
-                <div class="flex justify-end">
-                    <button onclick="startJob()" id="btn-start"
-                        class="w-full bg-blue-600 text-white p-2 rounded hover:bg-blue-700 transition flex justify-center items-center gap-2">
-                        <i class="fa-solid fa-play"></i> Start Scraping
-                    </button>
-                </div>
+            <!-- Row 2: Button Only -->
+            <div class="mb-4">
+                <button onclick="startJob()" id="btn-start"
+                    class="w-full bg-blue-600 text-white p-2 rounded hover:bg-blue-700 transition flex justify-center items-center gap-2">
+                    <i class="fa-solid fa-play"></i> Start Scraping
+                </button>
             </div>
 
             <!-- Advanced Options (Date) -->
@@ -162,7 +153,6 @@
 
             // Fix: Retrieve these values from DOM
             const workerMode = document.getElementById('worker_mode').value;
-            const combineMode = document.getElementById('combine_mode') ? document.getElementById('combine_mode').checked : true; // Default true
 
             if (!keyword) {
                 alert('Please enter a keyword');
@@ -186,8 +176,7 @@
                         start_date: start_date,
                         end_date: end_date,
                         smart_mode: smartMode,
-                        worker_mode: parseInt(workerMode),
-                        combine_mode: combineMode
+                        worker_mode: parseInt(workerMode)
                     })
                 });
 

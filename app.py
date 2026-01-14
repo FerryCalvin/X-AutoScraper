@@ -120,6 +120,27 @@ job_lock = threading.Semaphore(1)
 BATCH_GROUPS = {} # { batch_id: { 'total': N, 'completed': 0, 'files': [], 'lock': Lock() } }
 BATCH_LOCK = threading.Lock()
 
+# --- DATE CHUNKING HELPER ---
+def generate_date_chunks(start_date_str, end_date_str, chunk_days=7):
+    """
+    Split a date range into smaller chunks for better scraping coverage.
+    Returns list of (start, end) tuples as strings.
+    """
+    from datetime import timedelta
+    
+    start = datetime.strptime(start_date_str, '%Y-%m-%d')
+    end = datetime.strptime(end_date_str, '%Y-%m-%d')
+    
+    chunks = []
+    current = start
+    
+    while current < end:
+        chunk_end = min(current + timedelta(days=chunk_days), end)
+        chunks.append((current.strftime('%Y-%m-%d'), chunk_end.strftime('%Y-%m-%d')))
+        current = chunk_end
+    
+    return chunks
+
 def check_batch_completion(batch_id):
     """Check if all jobs in a batch are done and merge them"""
     with BATCH_LOCK:
@@ -228,6 +249,15 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
                         
                         # Update status to show expansion
                         update_job_status(job_id, f'RUNNING (Expanded: {final_keyword})')
+                        
+                # 5. Cleanup: Delete discovery temp file if it exists
+                discovery_file = f"tweets_{keyword.replace(' ', '_')}.json"
+                if os.path.exists(discovery_file):
+                    os.remove(discovery_file)
+                    print(f"🗑️ Deleted temp discovery file: {discovery_file}")
+                csv_file = discovery_file.replace('.json', '.csv')
+                if os.path.exists(csv_file):
+                    os.remove(csv_file)
             # ------------------------
     
         
@@ -235,17 +265,75 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
             def on_progress(msg):
                 update_job_status(job_id, 'RUNNING', msg)
             
-            # Determine strategy based on count AND worker_mode
-            # If Safe Mode (1 worker), we prefer Standard Scraper UNLESS count is very high, 
-            # then we use Parallel with 1 worker to avoid memory leaks.
-            # But Standard Scraper is most "human-like".
+            # --- AUTO DATE CHUNKING ---
+            # If date range is > 7 days, split into weekly chunks for better coverage
+            all_tweets = []
+            date_chunks = []
             
-            use_parallel = count > 500 or worker_mode > 1
+            if start_date and end_date:
+                from datetime import timedelta
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                range_days = (end_dt - start_dt).days
+                
+                if range_days > 7:
+                    date_chunks = generate_date_chunks(start_date, end_date, chunk_days=7)
+                    print(f"📅 Date range ({range_days} days) split into {len(date_chunks)} weekly chunks")
             
-            if use_parallel:
-                workers = worker_mode
-                print(f"🚀 Using Parallel Strategy for {count} tweets (Workers: {workers})")
-                update_job_status(job_id, 'RUNNING', f'Running parallel scraper ({workers} workers)')
+            # If we have chunks, scrape each chunk separately
+            if date_chunks:
+                for i, (chunk_start, chunk_end) in enumerate(date_chunks):
+                    update_job_status(job_id, 'RUNNING', f'Scraping chunk {i+1}/{len(date_chunks)} ({chunk_start} to {chunk_end})')
+                    print(f"📅 Scraping chunk {i+1}/{len(date_chunks)}: {chunk_start} to {chunk_end}")
+                    
+                    search_query = f"{final_keyword} since:{chunk_start} until:{chunk_end}"
+                    
+                    chunk_tweets = scraper_selenium.scrape_twitter(
+                        keyword=search_query, 
+                        count=count // len(date_chunks), # Distribute count across chunks
+                        headless=True,
+                        progress_callback=lambda msg: update_job_status(job_id, 'RUNNING', f'Chunk {i+1}: {msg}')
+                    )
+                    
+                    if chunk_tweets:
+                        all_tweets.extend(chunk_tweets)
+                        print(f"   Got {len(chunk_tweets)} tweets from chunk {i+1}")
+                    
+                    # Small break between chunks
+                    time.sleep(3)
+                
+                # Save all merged tweets
+                if all_tweets:
+                    filename_abs = f"{os.getcwd()}/{OUTPUT_DIR}/chunked_{job_id}_{keyword.replace(' ', '_')}.csv"
+                    
+                    # Deduplicate by tweet URL
+                    seen_urls = set()
+                    unique_tweets = []
+                    for t in all_tweets:
+                        url = t.get('url', t.get('tweet_url', ''))
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            unique_tweets.append(t)
+                    
+                    # Save CSV
+                    if unique_tweets:
+                        keys = unique_tweets[0].keys()
+                        with open(filename_abs, 'w', newline='', encoding='utf-8') as f:
+                            writer = csv.DictWriter(f, fieldnames=keys)
+                            writer.writeheader()
+                            writer.writerows(unique_tweets)
+                        
+                        print(f"✨ Chunked scrape complete: {len(unique_tweets)} unique tweets from {len(date_chunks)} chunks")
+                
+            # --- REGULAR SCRAPING (No chunking needed) ---
+            else:
+                # Determine strategy based on count AND worker_mode
+                use_parallel = count > 500 or worker_mode > 1
+            
+                if use_parallel:
+                    workers = worker_mode
+                    print(f"🚀 Using Parallel Strategy for {count} tweets (Workers: {workers})")
+                    update_job_status(job_id, 'RUNNING', f'Running parallel scraper ({workers} workers)')
                 
                 try:
                     kwargs = {
@@ -259,32 +347,32 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
 
                     filename_abs = scraper_parallel.run_parallel_job(**kwargs)
                 except Exception as e:
-                    print(f"Parallel scraper error: {e}")
-                    raise e
+                        print(f"Parallel scraper error: {e}")
+                        raise e
+                        
+                else:
+                    # Standard Scraper (Safe Mode for small/medium counts)
+                    print(f"🐢 Using Standard Strategy for {count} tweets")
+                    update_job_status(job_id, 'RUNNING', 'Starting browser (Safe Mode)...')
                     
-            else:
-                # Standard Scraper (Safe Mode for small/medium counts)
-                print(f"🐢 Using Standard Strategy for {count} tweets")
-                update_job_status(job_id, 'RUNNING', 'Starting browser (Safe Mode)...')
-                
-                # Append dates to keyword for standard scraper logic (Twitter search syntax)
-                search_query = final_keyword
-                if start_date:
-                    search_query += f" since:{start_date}"
-                if end_date:
-                    search_query += f" until:{end_date}"
-                
-                # Define output filename
-                filename_abs = f"{os.getcwd()}/{OUTPUT_DIR}/job_{job_id}_{keyword.replace(' ', '_')}.json"
-                
-                # Run Standard with Callback
-                tweets = scraper_selenium.scrape_twitter(
-                    keyword=search_query, 
-                    count=count, 
-                    headless=True,
-                    output_filename=filename_abs,
-                    progress_callback=on_progress
-                )
+                    # Append dates to keyword for standard scraper logic (Twitter search syntax)
+                    search_query = final_keyword
+                    if start_date:
+                        search_query += f" since:{start_date}"
+                    if end_date:
+                        search_query += f" until:{end_date}"
+                    
+                    # Define output filename
+                    filename_abs = f"{os.getcwd()}/{OUTPUT_DIR}/job_{job_id}_{keyword.replace(' ', '_')}.json"
+                    
+                    # Run Standard with Callback
+                    tweets = scraper_selenium.scrape_twitter(
+                        keyword=search_query, 
+                        count=count, 
+                        headless=True,
+                        output_filename=filename_abs,
+                        progress_callback=on_progress
+                    )
                 
             result_tweets_count = 0 
             if filename_abs and os.path.exists(filename_abs):
@@ -294,13 +382,14 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
                         with open(filename_abs, 'r', encoding='utf-8') as f:
                             data = json.load(f)
                             result_tweets_count = len(data)
-                    # Parallel strategy might return CSV path now? check implementation
-                    # Usually scraper_parallel returns JSON path so far.
+                    elif filename_abs.endswith('.csv'):
+                        with open(filename_abs, 'r', encoding='utf-8') as f:
+                            result_tweets_count = sum(1 for _ in f) - 1 # Subtract header
                 except: pass
                 
             # Clean up filename for DB (just basename)
             if filename_abs:
-                filename = os.path.basename(filename_abs).replace('.json', '.csv')
+                filename = os.path.basename(filename_abs)
             else:
                 filename = None
         
@@ -339,74 +428,38 @@ def create_job():
     end_date = data.get('end_date')
     smart_mode = data.get('smart_mode', False)
     worker_mode = int(data.get('worker_mode', 3)) # Default 3
-    merge_batch = data.get('merge_batch', False)
-    combine_mode = data.get('combine_mode', False)
     
     if not raw_keyword:
         return jsonify({'error': 'Keyword is required'}), 400
         
-    # Handle Comma-Separated Keywords (Batch Mode)
+    # Handle Comma-Separated Keywords - ALWAYS combine with OR
     keywords = [k.strip() for k in raw_keyword.split(',') if k.strip()]
     
-    created_jobs = []
-    
-    # --- COMBINE MODE (SINGLE JOB) ---
-    if combine_mode and len(keywords) > 1:
+    # --- ALWAYS COMBINE MULTIPLE KEYWORDS ---
+    if len(keywords) > 1:
         # Join keywords: "banjir OR gempa"
         combined_keyword = " OR ".join(keywords)
-        job_id = str(uuid.uuid4())
-        
-        # Save to DB
-        conn = get_db()
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)",
-            (job_id, combined_keyword, count, 'PENDING', datetime.now(), 'Queued (Combined Job)')
-        )
-        conn.commit()
-        conn.close()
-        
-        # Start background thread
-        thread = threading.Thread(target=run_scraper_thread, args=(job_id, combined_keyword, count, start_date, end_date, smart_mode, worker_mode, None))
-        thread.daemon = True
-        thread.start()
-        
-        created_jobs.append(job_id)
-        
-    # --- BATCH MODE (MULTIPLE JOBS) ---
     else:
-        # Initialize Batch Group if merging is requested
-        batch_id = None
-        if merge_batch and len(keywords) > 1:
-            batch_id = str(uuid.uuid4())
-            with BATCH_LOCK:
-                BATCH_GROUPS[batch_id] = {
-                    'total': len(keywords),
-                    'completed': 0,
-                    'files': []
-                }
-        
-        for keyword in keywords:
-            job_id = str(uuid.uuid4())
-           
-            # Save to DB
-            conn = get_db()
-            c = conn.cursor()
-            c.execute(
-                "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)",
-                (job_id, keyword, count, 'PENDING', datetime.now(), 'Queued (Waiting for slot...)')
-            )
-            conn.commit()
-            conn.close()
-            
-            # Start background thread
-            thread = threading.Thread(target=run_scraper_thread, args=(job_id, keyword, count, start_date, end_date, smart_mode, worker_mode, batch_id))
-            thread.daemon = True
-            thread.start()
-            
-            created_jobs.append(job_id)
+        combined_keyword = keywords[0]
     
-    return jsonify({'job_ids': created_jobs, 'status': 'PENDING', 'message': f'Created {len(created_jobs)} jobs'})
+    job_id = str(uuid.uuid4())
+    
+    # Save to DB
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)",
+        (job_id, combined_keyword, count, 'PENDING', datetime.now(), 'Queued...')
+    )
+    conn.commit()
+    conn.close()
+    
+    # Start background thread
+    thread = threading.Thread(target=run_scraper_thread, args=(job_id, combined_keyword, count, start_date, end_date, smart_mode, worker_mode, None))
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify({'job_id': job_id, 'status': 'PENDING', 'message': 'Job created'})
 
 @app.route('/api/jobs', methods=['GET'])
 def list_jobs():
