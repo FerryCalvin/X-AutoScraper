@@ -161,6 +161,7 @@
             // Fix: Retrieve these values from DOM
             const workerMode = document.getElementById('worker_mode').value;
             const mergeBatch = document.getElementById('merge_batch') ? document.getElementById('merge_batch').checked : false;
+            const combineMode = document.getElementById('combine_mode') ? document.getElementById('combine_mode').checked : false;
 
             if (!keyword) {
                 alert('Please enter a keyword');
@@ -185,7 +186,8 @@
                         end_date: end_date,
                         smart_mode: smartMode,
                         worker_mode: parseInt(workerMode),
-                        merge_batch: mergeBatch
+                        merge_batch: mergeBatch,
+                        combine_mode: combineMode
                     })
                 });
 

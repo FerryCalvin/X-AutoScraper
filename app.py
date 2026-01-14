@@ -167,8 +167,8 @@ def check_batch_completion(batch_id):
                 c = conn.cursor()
                 sys_job_id = f"batch-{batch_id[:8]}"
                 c.execute(
-                    "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress, filename) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (sys_job_id, "📦 MATCH MERGED RESULT", len(all_data), 'COMPLETED', datetime.now(), f'Merged {len(valid_files)} files', merged_filename)
+                    "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress, result_file) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (sys_job_id, "📦 COMBINED/MERGED RESULT", len(all_data), 'COMPLETED', datetime.now(), f'Merged {len(valid_files)} files', merged_filename)
                 )
                 conn.commit()
                 conn.close()
@@ -198,11 +198,11 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
                 # 1. Update status
                 update_job_status(job_id, 'RUNNING (Discovery Phase 🕵️)')
                 
-                # 2. Discovery Scrape (Small batch)
+                # 2. Discovery Scrape (Larger sample for better hashtag discovery)
                 print(f"🧠 Smart Mode: Scanning for topics related to '{keyword}'...")
                 discovery_tweets = scraper_selenium.scrape_twitter(
                     keyword, 
-                    count=20, # Small sample
+                    count=50, # Larger sample for better hashtag discovery (was 20)
                     headless=True
                 )
                 
@@ -210,13 +210,14 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
                 if discovery_tweets:
                     all_hashtags = []
                     for t in discovery_tweets:
-                        # Extract hashtags manually if not present in dict yet (safety)
-                        tags = re.findall(r'#\w+', t.get('text', ''))
+                        # Extract hashtags from original text
+                        original = t.get('text', '')
+                        tags = re.findall(r'#\w+', original.lower())
                         all_hashtags.extend(tags)
                     
-                    # Top 3 Hashtags
+                    # Top 5 Hashtags (more aggressive expansion)
                     from collections import Counter
-                    top_tags = [tag for tag, _ in Counter(all_hashtags).most_common(3)]
+                    top_tags = [tag for tag, _ in Counter(all_hashtags).most_common(5)]
                     
                     if top_tags:
                         # 4. Expansion
@@ -339,6 +340,7 @@ def create_job():
     smart_mode = data.get('smart_mode', False)
     worker_mode = int(data.get('worker_mode', 3)) # Default 3
     merge_batch = data.get('merge_batch', False)
+    combine_mode = data.get('combine_mode', False)
     
     if not raw_keyword:
         return jsonify({'error': 'Keyword is required'}), 400
@@ -348,18 +350,10 @@ def create_job():
     
     created_jobs = []
     
-    # Initialize Batch Group if merging is requested
-    batch_id = None
-    if merge_batch and len(keywords) > 1:
-        batch_id = str(uuid.uuid4())
-        with BATCH_LOCK:
-            BATCH_GROUPS[batch_id] = {
-                'total': len(keywords),
-                'completed': 0,
-                'files': []
-            }
-    
-    for keyword in keywords:
+    # --- COMBINE MODE (SINGLE JOB) ---
+    if combine_mode and len(keywords) > 1:
+        # Join keywords: "banjir OR gempa"
+        combined_keyword = " OR ".join(keywords)
         job_id = str(uuid.uuid4())
         
         # Save to DB
@@ -367,17 +361,50 @@ def create_job():
         c = conn.cursor()
         c.execute(
             "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)",
-            (job_id, keyword, count, 'PENDING', datetime.now(), 'Queued (Waiting for slot...)')
+            (job_id, combined_keyword, count, 'PENDING', datetime.now(), 'Queued (Combined Job)')
         )
         conn.commit()
         conn.close()
         
         # Start background thread
-        thread = threading.Thread(target=run_scraper_thread, args=(job_id, keyword, count, start_date, end_date, smart_mode, worker_mode, batch_id))
+        thread = threading.Thread(target=run_scraper_thread, args=(job_id, combined_keyword, count, start_date, end_date, smart_mode, worker_mode, None))
         thread.daemon = True
         thread.start()
         
         created_jobs.append(job_id)
+        
+    # --- BATCH MODE (MULTIPLE JOBS) ---
+    else:
+        # Initialize Batch Group if merging is requested
+        batch_id = None
+        if merge_batch and len(keywords) > 1:
+            batch_id = str(uuid.uuid4())
+            with BATCH_LOCK:
+                BATCH_GROUPS[batch_id] = {
+                    'total': len(keywords),
+                    'completed': 0,
+                    'files': []
+                }
+        
+        for keyword in keywords:
+            job_id = str(uuid.uuid4())
+           
+            # Save to DB
+            conn = get_db()
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)",
+                (job_id, keyword, count, 'PENDING', datetime.now(), 'Queued (Waiting for slot...)')
+            )
+            conn.commit()
+            conn.close()
+            
+            # Start background thread
+            thread = threading.Thread(target=run_scraper_thread, args=(job_id, keyword, count, start_date, end_date, smart_mode, worker_mode, batch_id))
+            thread.daemon = True
+            thread.start()
+            
+            created_jobs.append(job_id)
     
     return jsonify({'job_ids': created_jobs, 'status': 'PENDING', 'message': f'Created {len(created_jobs)} jobs'})
 

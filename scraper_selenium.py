@@ -58,14 +58,28 @@ def random_delay(min_sec=1.5, max_sec=4.0):
     """Sleep for a random amount of time to simulate human behavior"""
     time.sleep(random.uniform(min_sec, max_sec))
 
+import html
+
 def clean_text(text):
     """Start-of-the-art preprocessing"""
+    if not text: return ""
+    
+    # 0. Decode HTML entities (&amp; -> &)
+    text = html.unescape(text)
+    
     # 1. Remove URLs
     text = re.sub(r'http\S+', '', text)
+    
     # 2. Remove Mentions (@user)
     text = re.sub(r'@\w+', '', text)
-    # 3. Remove extra whitespace
+    
+    # 3. Remove Emojis & Special Symbols (Keep only alphanumeric, punctuation, and basic latin)
+    # This regex keeps letters, numbers, spaces, and basic punctuation
+    text = re.sub(r'[^\w\s,.:;!?#"\'-]', '', text)
+    
+    # 4. Remove extra whitespace
     text = re.sub(r'\s+', ' ', text).strip()
+    
     return text.lower() # Optional: Lowercase
 
 def parse_metric(element):
@@ -150,8 +164,9 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
         last_height = driver.execute_script("return document.body.scrollHeight")
         scroll_attempts = 0
         consecutive_no_new_tweets = 0
+        max_scroll_attempts = 30 # More aggressive (was 15)
         
-        while len(tweets) < count and scroll_attempts < 15:
+        while len(tweets) < count and scroll_attempts < max_scroll_attempts:
             # Get articles
             articles = driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']")
             new_tweets_found = False
@@ -238,8 +253,18 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
             new_height = driver.execute_script("return document.body.scrollHeight")
             if new_height == last_height:
                 scroll_attempts += 1
+                # Try harder: Super scroll + wait
+                if scroll_attempts % 5 == 0:
+                    log(f"   🔄 Retrying scroll (Attempt {scroll_attempts}/{max_scroll_attempts})...")
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(3)
             else:
                 last_height = new_height
+                scroll_attempts = max(0, scroll_attempts - 1) # Decay if making progress
+        
+        # Final status
+        if len(tweets) < count:
+            log(f"⚠️ Only found {len(tweets)} tweets (Target: {count}). Twitter might not have more data for this query.")
                 
         print(f"\n✅ Successfully scraped {len(tweets)} tweets!")
         return tweets
