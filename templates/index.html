@@ -113,6 +113,18 @@
                     <p class="text-xs text-blue-700">Auto-discovers hashtags & expands query (e.g. adds #banjiraceh)</p>
                 </div>
             </div>
+
+            <!-- Auto-Expand Mode (for large targets) -->
+            <div class="mt-2 p-3 bg-purple-50 rounded border border-purple-100 flex items-center gap-3">
+                <input type="checkbox" id="autoExpand" checked
+                    class="w-5 h-5 text-purple-600 rounded focus:ring-purple-500 cursor-pointer">
+                <div>
+                    <label for="autoExpand" class="font-medium text-purple-900 cursor-pointer block text-sm">Auto-Expand
+                        Mode (Batch) 🚀</label>
+                    <p class="text-xs text-purple-700">Splits keywords & merges results (recommended for count > 2000)
+                    </p>
+                </div>
+            </div>
         </div>
 
         <!-- Job Monitor Section -->
@@ -189,6 +201,7 @@
             const start_date = document.getElementById('start_date').value;
             const end_date = document.getElementById('end_date').value;
             const smartMode = document.getElementById('smartMode') ? document.getElementById('smartMode').checked : false;
+            const autoExpand = document.getElementById('autoExpand') ? document.getElementById('autoExpand').checked : false;
 
             // Fix: Retrieve these values from DOM
             const workerMode = document.getElementById('worker_mode').value;
@@ -215,6 +228,7 @@
                         start_date: start_date,
                         end_date: end_date,
                         smart_mode: smartMode,
+                        auto_expand: autoExpand,
                         worker_mode: parseInt(workerMode)
                     })
                 });
