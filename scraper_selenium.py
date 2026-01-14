@@ -283,7 +283,9 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
         # Clean keyword for filename and TRUNCATE to avoid Windows 260 char path limit
         clean_kw = "".join([c if c.isalnum() else "_" for c in keyword])
         clean_kw = clean_kw[:100]  # Truncate to 100 chars max
-        filename = f"tweets_{clean_kw}.json"
+        # Save to outputs folder by default
+        os.makedirs("outputs", exist_ok=True)
+        filename = f"outputs/tweets_{clean_kw}.json"
 
     
     try:
