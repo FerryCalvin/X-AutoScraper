@@ -78,12 +78,14 @@
                 </div>
             </div>
 
-            <!-- Row 2: Merge & Button -->
+            <!-- Row 2: Combine Mode & Button -->
             <div class="grid grid-cols-2 gap-4 mb-4">
                 <div class="flex items-center">
-                    <input type="checkbox" id="merge_batch" class="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
-                        checked>
-                    <label for="merge_batch" class="ml-2 text-sm text-gray-700">Merge Batch Results 🔗</label>
+                    <input type="checkbox" id="combine_mode"
+                        class="w-4 h-4 text-purple-600 rounded focus:ring-purple-500" checked>
+                    <label for="combine_mode" class="ml-2 text-sm text-gray-700">Combine Keywords (OR) 🔗</label>
+                    <span class="ml-2 text-xs text-gray-400"
+                        title="Gabungkan keyword menjadi satu job (misal: banjir OR gempa)">?</span>
                 </div>
                 <div class="flex justify-end">
                     <button onclick="startJob()" id="btn-start"
@@ -160,8 +162,7 @@
 
             // Fix: Retrieve these values from DOM
             const workerMode = document.getElementById('worker_mode').value;
-            const mergeBatch = document.getElementById('merge_batch') ? document.getElementById('merge_batch').checked : false;
-            const combineMode = document.getElementById('combine_mode') ? document.getElementById('combine_mode').checked : false;
+            const combineMode = document.getElementById('combine_mode') ? document.getElementById('combine_mode').checked : true; // Default true
 
             if (!keyword) {
                 alert('Please enter a keyword');
@@ -186,7 +187,6 @@
                         end_date: end_date,
                         smart_mode: smartMode,
                         worker_mode: parseInt(workerMode),
-                        merge_batch: mergeBatch,
                         combine_mode: combineMode
                     })
                 });
