@@ -659,39 +659,62 @@ def create_job():
             seen_urls = set()
             completed_count = 0
             
+            # AUTO DATE CHUNKING: If no dates specified, cover Nov 20 to now
+            date_chunks = []
+            if not start_date and not end_date:
+                from datetime import timedelta
+                # Banjir started late November 2025
+                chunk_start = datetime(2025, 11, 20)
+                chunk_end = datetime.now()
+                
+                # Create weekly chunks
+                current = chunk_start
+                while current < chunk_end:
+                    next_chunk = min(current + timedelta(days=7), chunk_end)
+                    date_chunks.append((current.strftime('%Y-%m-%d'), next_chunk.strftime('%Y-%m-%d')))
+                    current = next_chunk
+                
+                print(f"  📅 Auto date chunking: {len(date_chunks)} weekly periods from Nov 20 to now")
+            else:
+                # Use provided dates
+                date_chunks = [(start_date or '', end_date or '')]
+            
+            # Process each keyword variation
             for i, variation in enumerate(variations):
-                try:
-                    update_job_status(parent_job_id, 'RUNNING', f'Scraping {i+1}/{len(variations)}: {variation}')
-                    print(f"  📍 [{i+1}/{len(variations)}] Scraping: {variation}")
-                    
-                    # Build search query with dates
-                    search_query = variation
-                    if start_date:
-                        search_query += f" since:{start_date}"
-                    if end_date:
-                        search_query += f" until:{end_date}"
-                    
-                    # Run scraper for this variation
-                    tweets = scraper_selenium.scrape_twitter(
-                        search_query,
-                        count=count_per_variation,
-                        headless=True
-                    )
-                    
-                    if tweets:
-                        # Deduplicate by URL
-                        for tweet in tweets:
-                            url = tweet.get('url', '')
-                            if url and url not in seen_urls:
-                                seen_urls.add(url)
-                                all_tweets.append(tweet)
+                for chunk_idx, (chunk_start_date, chunk_end_date) in enumerate(date_chunks):
+                    try:
+                        chunk_info = f" ({chunk_start_date} to {chunk_end_date})" if chunk_start_date else ""
+                        update_job_status(parent_job_id, 'RUNNING', f'Scraping {i+1}/{len(variations)}: {variation}{chunk_info}')
+                        print(f"  📍 [{i+1}/{len(variations)}] Scraping: {variation}{chunk_info}")
                         
-                        completed_count += 1
-                        print(f"  ✅ Got {len(tweets)} tweets, total unique: {len(all_tweets)}")
+                        # Build search query with dates
+                        search_query = variation
+                        if chunk_start_date:
+                            search_query += f" since:{chunk_start_date}"
+                        if chunk_end_date:
+                            search_query += f" until:{chunk_end_date}"
+                        
+                        # Run scraper for this variation + date chunk
+                        tweets = scraper_selenium.scrape_twitter(
+                            search_query,
+                            count=count_per_variation // max(1, len(date_chunks)),  # Distribute count across chunks
+                            headless=True
+                        )
+                        
+                        if tweets:
+                            # Deduplicate by URL
+                            for tweet in tweets:
+                                url = tweet.get('url', '')
+                                if url and url not in seen_urls:
+                                    seen_urls.add(url)
+                                    all_tweets.append(tweet)
+                            
+                            completed_count += 1
+                            print(f"  ✅ Got {len(tweets)} tweets, total unique: {len(all_tweets)}")
                     
-                except Exception as e:
-                    print(f"  ❌ Error with '{variation}': {e}")
-                    continue
+                    except Exception as e:
+                        print(f"  ❌ Error with '{variation}': {e}")
+                        continue
             
             # Save merged results
             if all_tweets:

@@ -211,6 +211,43 @@ def normalize_unicode_fonts(text):
     
     return ''.join(result)
 
+def is_indonesian_text(text):
+    """
+    Check if text is likely Indonesian/Latin-based.
+    Returns False for Korean, Chinese, Japanese, Arabic, etc.
+    """
+    if not text:
+        return False
+    
+    # Count Latin characters vs non-Latin
+    latin_count = 0
+    non_latin_count = 0
+    
+    for char in text:
+        code = ord(char)
+        # Basic Latin, Latin Extended, Latin Supplement
+        if (0x0000 <= code <= 0x024F) or char.isspace() or char.isdigit():
+            latin_count += 1
+        # Korean (Hangul)
+        elif 0xAC00 <= code <= 0xD7AF or 0x1100 <= code <= 0x11FF:
+            non_latin_count += 1
+        # Chinese (CJK)
+        elif 0x4E00 <= code <= 0x9FFF:
+            non_latin_count += 1
+        # Japanese (Hiragana, Katakana)
+        elif 0x3040 <= code <= 0x30FF:
+            non_latin_count += 1
+        # Arabic
+        elif 0x0600 <= code <= 0x06FF:
+            non_latin_count += 1
+    
+    # If more than 20% non-Latin, likely not Indonesian
+    total = latin_count + non_latin_count
+    if total == 0:
+        return True
+    
+    return (non_latin_count / total) < 0.2
+
 def clean_text(text):
     """Start-of-the-art preprocessing with Unicode normalization"""
     if not text: return ""
@@ -366,6 +403,10 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
                         # Views often don't have a distinct test-id easily found without hover sometimes, but let's try
                         # views = parse_metric(article.find_element(By.CSS_SELECTOR, "div[data-testid='app-text-transition-container']")) 
                     except: pass
+                    
+                    # Filter out non-Indonesian text (Korean, Chinese, Japanese, Arabic)
+                    if not is_indonesian_text(original_text):
+                        continue  # Skip this tweet
                     
                     tweets.append({
                         "username": username,
