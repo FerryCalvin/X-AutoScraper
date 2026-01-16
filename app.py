@@ -659,13 +659,13 @@ def create_job():
             seen_urls = set()
             completed_count = 0
             
-            # AUTO DATE CHUNKING: If no dates specified, cover Nov 20 to now
+            # AUTO DATE CHUNKING: If no dates specified, cover last 60 days
             date_chunks = []
             if not start_date and not end_date:
                 from datetime import timedelta
-                # Banjir started late November 2025
-                chunk_start = datetime(2025, 11, 20)
+                # General: Go back 60 days from now for comprehensive coverage
                 chunk_end = datetime.now()
+                chunk_start = chunk_end - timedelta(days=60)
                 
                 # Create weekly chunks
                 current = chunk_start
@@ -674,7 +674,7 @@ def create_job():
                     date_chunks.append((current.strftime('%Y-%m-%d'), next_chunk.strftime('%Y-%m-%d')))
                     current = next_chunk
                 
-                print(f"  📅 Auto date chunking: {len(date_chunks)} weekly periods from Nov 20 to now")
+                print(f"  📅 Auto date chunking: {len(date_chunks)} weekly periods (last 60 days)")
             else:
                 # Use provided dates
                 date_chunks = [(start_date or '', end_date or '')]
