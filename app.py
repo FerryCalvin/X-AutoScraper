@@ -626,9 +626,20 @@ def create_job():
                 variations.append(f"berita {kw}")
                 variations.append(f"update {kw}")
         
+        # CREATE SINGLE PARENT JOB FIRST (before discovery)
+        parent_job_id = str(uuid.uuid4())
+        
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)",
+            (parent_job_id, f"🚀 {base_keyword} (Auto-Expand)", count, 'RUNNING', datetime.now(), 'Discovery Phase: Finding related hashtags...')
+        )
+        conn.commit()
+        conn.close()
+        
         # Step 2: DYNAMIC DISCOVERY - Scrape sample tweets to find related hashtags
         print(f"🧠 Dynamic Discovery: Scanning for related hashtags...")
-        update_job_status(parent_job_id, 'RUNNING', 'Discovery Phase: Finding related hashtags...')
         
         discovery_hashtags = []
         try:
