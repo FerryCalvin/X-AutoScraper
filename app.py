@@ -618,26 +618,47 @@ def create_job():
         for kw in keywords:
             if kw not in variations:
                 variations.append(kw)
+            # Add hashtag version
             if not kw.startswith('#'):
                 variations.append(f"#{kw.replace(' ', '')}")
+            # Add with "korban" prefix for disaster topics
+            if not kw.startswith('#'):
+                variations.append(f"korban {kw}")
         
-        # Add related keywords
+        # Add related keywords based on common patterns
         extra_keywords = []
         for kw in keywords:
             kw_lower = kw.lower()
+            # Disaster-related expansions
             if 'banjir' in kw_lower:
-                extra_keywords.extend(['korban banjir', 'banjir bandang', '#prayforsumatera'])
+                extra_keywords.extend([
+                    'korban banjir', 'banjir bandang', '#prayforsumatera', '#PrayForSumatera',
+                    'pengungsi banjir', 'evakuasi banjir', 'bantuan banjir', 'relawan banjir'
+                ])
             if 'aceh' in kw_lower:
-                extra_keywords.extend(['#acehtamiang', 'bencana aceh', 'longsor aceh'])
+                extra_keywords.extend([
+                    '#acehtamiang', '#BanjirAceh', 'bencana aceh', 'longsor aceh',
+                    'aceh tamiang', 'aceh tengah', 'aceh utara'
+                ])
             if 'sumatra' in kw_lower or 'sumatera' in kw_lower:
-                extra_keywords.extend(['#banjirsumatra', 'bencana sumatera'])
+                extra_keywords.extend([
+                    '#banjirsumatra', '#BanjirSumatra', 'bencana sumatera',
+                    'sumatera utara', 'sumut', 'sumbar', '#PrayForSumut'
+                ])
+            # General disaster keywords
+            if any(x in kw_lower for x in ['banjir', 'gempa', 'longsor', 'bencana']):
+                extra_keywords.extend([
+                    '#BNPB', '#BPBD', 'TNI bantu', 'Basarnas', 'SAR',
+                    'status bencana', 'darurat bencana', 'donasi bencana'
+                ])
         
         for extra in extra_keywords:
             if extra not in variations:
                 variations.append(extra)
         
-        variations = list(set(variations))[:8]
-        count_per_variation = max(500, count // len(variations))
+        # INCREASED: From 8 to 15 variations for more coverage
+        variations = list(set(variations))[:15]
+        count_per_variation = max(300, count // len(variations))
         
         print(f"🔄 Auto-Expand: {len(variations)} keywords, {count_per_variation} each")
         

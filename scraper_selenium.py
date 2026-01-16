@@ -358,7 +358,7 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
         last_height = driver.execute_script("return document.body.scrollHeight")
         scroll_attempts = 0
         consecutive_no_new_tweets = 0
-        max_scroll_attempts = 30 # More aggressive (was 15)
+        max_scroll_attempts = 50 # More aggressive (was 30)
         
         while len(tweets) < count and scroll_attempts < max_scroll_attempts:
             # Get articles
