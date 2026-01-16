@@ -608,22 +608,20 @@ def create_job():
     
     # --- AUTO-EXPAND MODE (for large targets) ---
     if auto_expand and count > 2000:
-        print(f"🚀 Auto-Expand Mode: Creating batch jobs for '{raw_keyword}'")
+        print(f"🚀 Auto-Expand Mode: Creating batch job for '{raw_keyword}'")
         
-        # Base keyword
+        # Base keyword for display
         base_keyword = keywords[0] if len(keywords) == 1 else " OR ".join(keywords)
         
-        # Generate keyword variations (split into separate mini-jobs)
+        # Generate keyword variations (to be processed internally)
         variations = []
         for kw in keywords:
-            # Add base keyword
             if kw not in variations:
                 variations.append(kw)
-            # Add common hashtag variants
             if not kw.startswith('#'):
                 variations.append(f"#{kw.replace(' ', '')}")
         
-        # Add additional related keywords based on common patterns
+        # Add related keywords
         extra_keywords = []
         for kw in keywords:
             kw_lower = kw.lower()
@@ -638,46 +636,90 @@ def create_job():
             if extra not in variations:
                 variations.append(extra)
         
-        # Limit to 8 variations max
         variations = list(set(variations))[:8]
-        
-        # Calculate count per variation
         count_per_variation = max(500, count // len(variations))
         
-        print(f"🔄 Created {len(variations)} keyword variations, {count_per_variation} each")
+        print(f"🔄 Auto-Expand: {len(variations)} keywords, {count_per_variation} each")
         
-        # Create batch group for merging
-        batch_id = str(uuid.uuid4())
-        with BATCH_LOCK:
-            BATCH_GROUPS[batch_id] = {
-                'total': len(variations),
-                'completed': 0,
-                'files': [],
-                'base_keyword': base_keyword
-            }
+        # CREATE SINGLE PARENT JOB (this is what user sees)
+        parent_job_id = str(uuid.uuid4())
         
-        job_ids = []
-        for variation in variations:
-            job_id = str(uuid.uuid4())
-            
-            # Save to DB
-            conn = get_db()
-            c = conn.cursor()
-            c.execute(
-                "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)",
-                (job_id, variation, count_per_variation, 'PENDING', datetime.now(), f'Queued (Batch: {variations.index(variation)+1}/{len(variations)})')
-            )
-            conn.commit()
-            conn.close()
-            
-            # Start background thread
-            thread = threading.Thread(target=run_scraper_thread, args=(job_id, variation, count_per_variation, start_date, end_date, smart_mode, worker_mode, batch_id))
-            thread.daemon = True
-            thread.start()
-            
-            job_ids.append(job_id)
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)",
+            (parent_job_id, f"🚀 {base_keyword} (Auto-Expand)", count, 'RUNNING', datetime.now(), f'Starting batch (0/{len(variations)} keywords)...')
+        )
+        conn.commit()
+        conn.close()
         
-        return jsonify({'job_ids': job_ids, 'status': 'PENDING', 'message': f'Created {len(variations)} batch jobs (Auto-Expand)'})
+        # Start single background thread that processes all variations internally
+        def run_auto_expand_batch():
+            all_tweets = []
+            seen_urls = set()
+            completed_count = 0
+            
+            for i, variation in enumerate(variations):
+                try:
+                    update_job_status(parent_job_id, 'RUNNING', f'Scraping {i+1}/{len(variations)}: {variation}')
+                    print(f"  📍 [{i+1}/{len(variations)}] Scraping: {variation}")
+                    
+                    # Build search query with dates
+                    search_query = variation
+                    if start_date:
+                        search_query += f" since:{start_date}"
+                    if end_date:
+                        search_query += f" until:{end_date}"
+                    
+                    # Run scraper for this variation
+                    tweets = scraper_selenium.scrape_twitter(
+                        search_query,
+                        count=count_per_variation,
+                        headless=True
+                    )
+                    
+                    if tweets:
+                        # Deduplicate by URL
+                        for tweet in tweets:
+                            url = tweet.get('url', '')
+                            if url and url not in seen_urls:
+                                seen_urls.add(url)
+                                all_tweets.append(tweet)
+                        
+                        completed_count += 1
+                        print(f"  ✅ Got {len(tweets)} tweets, total unique: {len(all_tweets)}")
+                    
+                except Exception as e:
+                    print(f"  ❌ Error with '{variation}': {e}")
+                    continue
+            
+            # Save merged results
+            if all_tweets:
+                timestamp = int(datetime.now().timestamp())
+                clean_kw = "".join([c if c.isalnum() else "_" for c in base_keyword])[:50]
+                output_filename = f"{OUTPUT_DIR}/autoexpand_{clean_kw}_{timestamp}.csv"
+                
+                # Write CSV
+                os.makedirs(OUTPUT_DIR, exist_ok=True)
+                keys = all_tweets[0].keys()
+                with open(output_filename, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=keys)
+                    writer.writeheader()
+                    writer.writerows(all_tweets)
+                
+                # Update parent job as COMPLETED
+                filename = os.path.basename(output_filename)
+                update_job_status(parent_job_id, 'COMPLETED', f'Found {len(all_tweets)} unique tweets (from {len(variations)} keywords)', filename)
+                print(f"🎉 Auto-Expand complete: {len(all_tweets)} tweets saved to {output_filename}")
+            else:
+                update_job_status(parent_job_id, 'FAILED', 'No tweets found', None)
+        
+        # Start the batch thread
+        thread = threading.Thread(target=run_auto_expand_batch)
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({'job_id': parent_job_id, 'status': 'RUNNING', 'message': f'Auto-Expand started ({len(variations)} keywords)'})
     
     # --- STANDARD MODE (single job) ---
     else:
