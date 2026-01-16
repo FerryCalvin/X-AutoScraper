@@ -358,7 +358,7 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
         last_height = driver.execute_script("return document.body.scrollHeight")
         scroll_attempts = 0
         consecutive_no_new_tweets = 0
-        max_scroll_attempts = 50 # More aggressive (was 30)
+        max_scroll_attempts = 100 # Maximum aggressive (was 50)
         
         while len(tweets) < count and scroll_attempts < max_scroll_attempts:
             # Get articles
@@ -451,13 +451,29 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
             new_height = driver.execute_script("return document.body.scrollHeight")
             if new_height == last_height:
                 scroll_attempts += 1
+                consecutive_no_new_tweets += 1
+                
                 # Try harder: Super scroll + wait
                 if scroll_attempts % 5 == 0:
                     log(f"   🔄 Retrying scroll (Attempt {scroll_attempts}/{max_scroll_attempts})...")
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                     time.sleep(3)
+                
+                # SMART RETRY: Refresh page every 20 failed attempts
+                if consecutive_no_new_tweets >= 10 and scroll_attempts % 20 == 0:
+                    log(f"   🔃 Page refresh to get more data...")
+                    driver.refresh()
+                    time.sleep(5)
+                    try:
+                        WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, "article[data-testid='tweet']"))
+                        )
+                    except:
+                        pass
+                    consecutive_no_new_tweets = 0
             else:
                 last_height = new_height
+                consecutive_no_new_tweets = 0
                 scroll_attempts = max(0, scroll_attempts - 1) # Decay if making progress
         
         # Final status

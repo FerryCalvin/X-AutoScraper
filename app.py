@@ -613,7 +613,7 @@ def create_job():
         # Base keyword for display
         base_keyword = keywords[0] if len(keywords) == 1 else " OR ".join(keywords)
         
-        # Generate keyword variations (to be processed internally)
+        # Step 1: Start with base variations
         variations = []
         for kw in keywords:
             if kw not in variations:
@@ -621,46 +621,51 @@ def create_job():
             # Add hashtag version
             if not kw.startswith('#'):
                 variations.append(f"#{kw.replace(' ', '')}")
-            # Add with "korban" prefix for disaster topics
-            if not kw.startswith('#'):
-                variations.append(f"korban {kw}")
+            # Add common prefixes (works for any topic)
+            if not kw.startswith('#') and len(kw.split()) <= 2:
+                variations.append(f"berita {kw}")
+                variations.append(f"update {kw}")
         
-        # Add related keywords based on common patterns
-        extra_keywords = []
-        for kw in keywords:
-            kw_lower = kw.lower()
-            # Disaster-related expansions
-            if 'banjir' in kw_lower:
-                extra_keywords.extend([
-                    'korban banjir', 'banjir bandang', '#prayforsumatera', '#PrayForSumatera',
-                    'pengungsi banjir', 'evakuasi banjir', 'bantuan banjir', 'relawan banjir'
-                ])
-            if 'aceh' in kw_lower:
-                extra_keywords.extend([
-                    '#acehtamiang', '#BanjirAceh', 'bencana aceh', 'longsor aceh',
-                    'aceh tamiang', 'aceh tengah', 'aceh utara'
-                ])
-            if 'sumatra' in kw_lower or 'sumatera' in kw_lower:
-                extra_keywords.extend([
-                    '#banjirsumatra', '#BanjirSumatra', 'bencana sumatera',
-                    'sumatera utara', 'sumut', 'sumbar', '#PrayForSumut'
-                ])
-            # General disaster keywords
-            if any(x in kw_lower for x in ['banjir', 'gempa', 'longsor', 'bencana']):
-                extra_keywords.extend([
-                    '#BNPB', '#BPBD', 'TNI bantu', 'Basarnas', 'SAR',
-                    'status bencana', 'darurat bencana', 'donasi bencana'
-                ])
+        # Step 2: DYNAMIC DISCOVERY - Scrape sample tweets to find related hashtags
+        print(f"🧠 Dynamic Discovery: Scanning for related hashtags...")
+        update_job_status(parent_job_id, 'RUNNING', 'Discovery Phase: Finding related hashtags...')
         
-        for extra in extra_keywords:
-            if extra not in variations:
-                variations.append(extra)
+        discovery_hashtags = []
+        try:
+            # Quick scrape to find trending hashtags for this topic
+            discovery_tweets = scraper_selenium.scrape_twitter(
+                base_keyword,
+                count=100,  # Sample size for discovery
+                headless=True
+            )
+            
+            if discovery_tweets:
+                # Extract all hashtags from discovery tweets
+                from collections import Counter
+                all_hashtags = []
+                for tweet in discovery_tweets:
+                    text = tweet.get('text', '')
+                    hashtags = re.findall(r'#\w+', text)
+                    all_hashtags.extend([h.lower() for h in hashtags])
+                
+                # Get top 15 most common hashtags
+                hashtag_counts = Counter(all_hashtags)
+                discovery_hashtags = [tag for tag, count in hashtag_counts.most_common(15) if count >= 2]
+                
+                print(f"  🔍 Found {len(discovery_hashtags)} trending hashtags: {discovery_hashtags[:5]}...")
+                
+                # Add discovered hashtags to variations
+                for tag in discovery_hashtags:
+                    if tag not in [v.lower() for v in variations]:
+                        variations.append(tag)
+        except Exception as e:
+            print(f"  ⚠️ Discovery failed: {e}, continuing with base variations")
         
-        # INCREASED: From 8 to 15 variations for more coverage
-        variations = list(set(variations))[:15]
-        count_per_variation = max(300, count // len(variations))
+        # Step 3: Limit and prepare
+        variations = list(set(variations))[:20]  # Increased to 20 for better coverage
+        count_per_variation = max(200, count // len(variations))
         
-        print(f"🔄 Auto-Expand: {len(variations)} keywords, {count_per_variation} each")
+        print(f"🔄 Auto-Expand: {len(variations)} keywords (including {len(discovery_hashtags)} discovered), {count_per_variation} each")
         
         # CREATE SINGLE PARENT JOB (this is what user sees)
         parent_job_id = str(uuid.uuid4())
