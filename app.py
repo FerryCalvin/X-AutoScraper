@@ -659,11 +659,34 @@ def create_job():
                     hashtags = re.findall(r'#\w+', text)
                     all_hashtags.extend([h.lower() for h in hashtags])
                 
-                # Get top 15 most common hashtags
+                # Get top 20 most common hashtags (we'll filter later)
                 hashtag_counts = Counter(all_hashtags)
-                discovery_hashtags = [tag for tag, count in hashtag_counts.most_common(15) if count >= 2]
+                candidate_hashtags = [tag for tag, count in hashtag_counts.most_common(20) if count >= 2]
                 
-                print(f"  🔍 Found {len(discovery_hashtags)} trending hashtags: {discovery_hashtags[:5]}...")
+                # RELEVANCE FILTER: Only keep hashtags related to original keywords
+                keyword_words = []
+                for kw in keywords:
+                    # Extract individual words from keyword
+                    words = re.findall(r'\w+', kw.lower())
+                    keyword_words.extend(words)
+                keyword_words = list(set(keyword_words))  # Unique words
+                
+                def is_relevant_hashtag(tag):
+                    """Check if hashtag is related to the keywords"""
+                    tag_clean = tag.replace('#', '').lower()
+                    
+                    # Check if any keyword word appears in the hashtag
+                    for word in keyword_words:
+                        if len(word) >= 3 and word in tag_clean:  # Word must be at least 3 chars
+                            return True
+                        if tag_clean in word:  # Or hashtag is part of keyword
+                            return True
+                    return False
+                
+                # Filter to only relevant hashtags
+                discovery_hashtags = [tag for tag in candidate_hashtags if is_relevant_hashtag(tag)]
+                
+                print(f"  🔍 Found {len(candidate_hashtags)} hashtags, {len(discovery_hashtags)} relevant: {discovery_hashtags[:5]}...")
                 
                 # Add discovered hashtags to variations
                 for tag in discovery_hashtags:
