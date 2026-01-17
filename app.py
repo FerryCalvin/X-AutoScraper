@@ -115,6 +115,37 @@ buffer_handler.setFormatter(logging.Formatter('%(message)s'))
 logging.getLogger().addHandler(buffer_handler)
 
 # ===================
+# AUTO CLEANUP OLD FILES
+# ===================
+def cleanup_old_outputs(max_age_days=3):
+    """Delete output files older than max_age_days"""
+    output_dir = CONFIG.get('output', {}).get('directory', 'outputs')
+    if not os.path.exists(output_dir):
+        return
+    
+    import time
+    now = time.time()
+    max_age_seconds = max_age_days * 24 * 60 * 60
+    deleted_count = 0
+    
+    for filename in os.listdir(output_dir):
+        filepath = os.path.join(output_dir, filename)
+        if os.path.isfile(filepath):
+            file_age = now - os.path.getmtime(filepath)
+            if file_age > max_age_seconds:
+                try:
+                    os.remove(filepath)
+                    deleted_count += 1
+                except Exception as e:
+                    pass  # Ignore errors
+    
+    if deleted_count > 0:
+        logging.info(f"🧹 Auto-cleanup: Deleted {deleted_count} files older than {max_age_days} days")
+
+# Run cleanup on startup
+cleanup_old_outputs(max_age_days=3)
+
+# ===================
 # RATE LIMIT TRACKING
 # ===================
 REQUEST_TIMESTAMPS = []  # List of timestamps for rate calculation

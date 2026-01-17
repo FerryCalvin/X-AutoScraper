@@ -248,6 +248,47 @@ def is_indonesian_text(text):
     
     return (non_latin_count / total) < 0.2
 
+def is_quality_text(text):
+    """
+    Check if text is quality content (not spam, ASCII art, or meaningless).
+    Returns False for:
+    - Very short text (< 20 chars)
+    - Mostly whitespace or special chars
+    - ASCII art patterns
+    - Repeated characters (like "JAJAJAJA")
+    """
+    if not text:
+        return False
+    
+    # Remove URLs and mentions for analysis
+    clean = re.sub(r'http\S+', '', text)
+    clean = re.sub(r'@\w+', '', clean)
+    clean = clean.strip()
+    
+    # Too short after cleaning
+    if len(clean) < 15:
+        return False
+    
+    # Count meaningful characters (letters and Indonesian words)
+    letters = sum(1 for c in clean if c.isalpha())
+    total = len(clean)
+    
+    # Less than 40% letters = probably spam/art
+    if total > 0 and (letters / total) < 0.4:
+        return False
+    
+    # Check for repeated character patterns (like "JAJAJA" or "HAHAHA")
+    if re.search(r'(.)\1{4,}', clean):  # Same char 5+ times
+        return False
+    if re.search(r'(..)\1{3,}', clean):  # Same 2-char pattern 4+ times (JAJA repeated)
+        return False
+    
+    # Check for excessive newlines (ASCII art pattern)
+    if clean.count('\n') > 5:
+        return False
+    
+    return True
+
 def clean_text(text):
     """Start-of-the-art preprocessing with Unicode normalization"""
     if not text: return ""
@@ -426,6 +467,10 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
                     
                     # Filter out non-Indonesian text (Korean, Chinese, Japanese, Arabic)
                     if not is_indonesian_text(original_text):
+                        continue  # Skip this tweet
+                    
+                    # Filter out spam, ASCII art, and low-quality content
+                    if not is_quality_text(original_text):
                         continue  # Skip this tweet
                     
                     tweets.append({
