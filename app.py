@@ -719,11 +719,29 @@ def create_job():
             seen_urls = set()
             completed_count = 0
             
-            # AUTO DATE CHUNKING: If no dates specified, cover last 60 days
+            # DATE CHUNKING: Always chunk for better coverage
             date_chunks = []
-            if not start_date and not end_date:
-                from datetime import timedelta
-                # General: Go back 60 days from now for comprehensive coverage
+            from datetime import timedelta
+            
+            if start_date and end_date:
+                # MANUAL DATES: Chunk the provided date range into weekly periods
+                try:
+                    chunk_start = datetime.strptime(start_date, '%Y-%m-%d')
+                    chunk_end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                    
+                    # Create weekly chunks for better coverage
+                    current = chunk_start
+                    while current < chunk_end_dt:
+                        next_chunk = min(current + timedelta(days=7), chunk_end_dt)
+                        date_chunks.append((current.strftime('%Y-%m-%d'), next_chunk.strftime('%Y-%m-%d')))
+                        current = next_chunk
+                    
+                    print(f"  📅 Date chunking (manual): {len(date_chunks)} weekly periods from {start_date} to {end_date}")
+                except Exception as e:
+                    print(f"  ⚠️ Date parsing error: {e}, using as single range")
+                    date_chunks = [(start_date, end_date)]
+            else:
+                # NO DATES: Auto-generate from last 60 days
                 chunk_end = datetime.now()
                 chunk_start = chunk_end - timedelta(days=60)
                 
@@ -735,9 +753,6 @@ def create_job():
                     current = next_chunk
                 
                 print(f"  📅 Auto date chunking: {len(date_chunks)} weekly periods (last 60 days)")
-            else:
-                # Use provided dates
-                date_chunks = [(start_date or '', end_date or '')]
             
             # Process each keyword variation
             for i, variation in enumerate(variations):
