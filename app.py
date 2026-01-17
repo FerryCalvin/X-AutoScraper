@@ -755,19 +755,31 @@ def create_job():
             from datetime import timedelta
             
             if start_date and end_date:
-                # MANUAL DATES: Chunk the provided date range into weekly periods
+                # MANUAL DATES: Chunk the provided date range
                 try:
                     chunk_start = datetime.strptime(start_date, '%Y-%m-%d')
                     chunk_end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                    range_days = (chunk_end_dt - chunk_start).days
                     
-                    # Create weekly chunks for better coverage
+                    # Adaptive chunk size based on range
+                    if range_days > 180:  # > 6 months: use monthly chunks
+                        chunk_days = 30
+                        chunk_type = "monthly"
+                    elif range_days > 60:  # > 2 months: use bi-weekly chunks
+                        chunk_days = 14
+                        chunk_type = "bi-weekly"
+                    else:  # <= 2 months: use weekly chunks
+                        chunk_days = 7
+                        chunk_type = "weekly"
+                    
+                    # Create chunks
                     current = chunk_start
                     while current < chunk_end_dt:
-                        next_chunk = min(current + timedelta(days=7), chunk_end_dt)
+                        next_chunk = min(current + timedelta(days=chunk_days), chunk_end_dt)
                         date_chunks.append((current.strftime('%Y-%m-%d'), next_chunk.strftime('%Y-%m-%d')))
                         current = next_chunk
                     
-                    print(f"  📅 Date chunking (manual): {len(date_chunks)} weekly periods from {start_date} to {end_date}")
+                    print(f"  📅 Date chunking: {len(date_chunks)} {chunk_type} periods ({range_days} days total)")
                 except Exception as e:
                     print(f"  ⚠️ Date parsing error: {e}, using as single range")
                     date_chunks = [(start_date, end_date)]
@@ -801,9 +813,11 @@ def create_job():
                             search_query += f" until:{chunk_end_date}"
                         
                         # Run scraper for this variation + date chunk
+                        # Use reasonable count per chunk (minimum 50, don't divide too much)
+                        chunk_count = max(50, min(200, count_per_variation))
                         tweets = scraper_selenium.scrape_twitter(
                             search_query,
-                            count=count_per_variation // max(1, len(date_chunks)),  # Distribute count across chunks
+                            count=chunk_count,
                             headless=True
                         )
                         
