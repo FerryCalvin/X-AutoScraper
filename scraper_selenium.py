@@ -396,13 +396,33 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
                     likes = 0
                     views = 0
                     
+                    # Try multiple methods to extract engagement metrics
                     try:
-                        replies = parse_metric(article.find_element(By.CSS_SELECTOR, "div[data-testid='reply']"))
-                        retweets = parse_metric(article.find_element(By.CSS_SELECTOR, "div[data-testid='retweet']"))
-                        likes = parse_metric(article.find_element(By.CSS_SELECTOR, "div[data-testid='like']"))
-                        # Views often don't have a distinct test-id easily found without hover sometimes, but let's try
-                        # views = parse_metric(article.find_element(By.CSS_SELECTOR, "div[data-testid='app-text-transition-container']")) 
+                        # Method 1: Using button's aria-label
+                        reply_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='reply']")
+                        replies = parse_metric(reply_btn)
                     except: pass
+                    
+                    try:
+                        retweet_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='retweet']")
+                        retweets = parse_metric(retweet_btn)
+                    except: pass
+                    
+                    try:
+                        like_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='like']")
+                        likes = parse_metric(like_btn)
+                    except: pass
+                    
+                    # Method 2: Try the group container if buttons failed
+                    if replies == 0 and retweets == 0 and likes == 0:
+                        try:
+                            group = article.find_element(By.CSS_SELECTOR, "div[role='group']")
+                            buttons = group.find_elements(By.CSS_SELECTOR, "button")
+                            if len(buttons) >= 4:
+                                replies = parse_metric(buttons[0])
+                                retweets = parse_metric(buttons[1])
+                                likes = parse_metric(buttons[2])
+                        except: pass
                     
                     # Filter out non-Indonesian text (Korean, Chinese, Japanese, Arabic)
                     if not is_indonesian_text(original_text):
