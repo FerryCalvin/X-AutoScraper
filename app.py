@@ -637,8 +637,8 @@ def create_job():
     # Handle Comma-Separated Keywords - ALWAYS combine with OR
     keywords = [k.strip() for k in raw_keyword.split(',') if k.strip()]
     
-    # --- AUTO-EXPAND MODE (for large targets) ---
-    if auto_expand and count > 2000:
+    # --- AUTO-EXPAND MODE (when user enables it) ---
+    if auto_expand:
         print(f"🚀 Auto-Expand Mode: Creating batch job for '{raw_keyword}'")
         
         # Base keyword for display
