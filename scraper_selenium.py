@@ -9,6 +9,7 @@ import time
 import json
 import csv
 import argparse
+import logging
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -17,6 +18,20 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+
+# Import config for consistent settings
+try:
+    from config import SCRAPER, WORKERS
+    SCRAPER_CONFIG = SCRAPER
+except ImportError:
+    # Fallback if run standalone
+    SCRAPER_CONFIG = {
+        'max_scroll_attempts': 100,
+        'coffee_break_interval': 50,
+        'coffee_break_duration': 15,
+        'scroll_delay_min': 1.5,
+        'scroll_delay_max': 4.0
+    }
 
 # User Cookies (Loaded from file)
 def load_cookies():
@@ -96,7 +111,8 @@ def check_account_health():
                             "value": cookie_value,
                             "domain": ".x.com"
                         })
-                    except: pass
+                    except Exception as e:
+                        logging.debug(f"Cookie injection warning for {cookie_name}: {e}")
             driver.refresh()
             time.sleep(3)
         
@@ -106,7 +122,8 @@ def check_account_health():
                 EC.presence_of_element_located((By.CSS_SELECTOR, "a[data-testid='SideNav_NewTweet_Button'], div[data-testid='tweetButtonInline']"))
             )
             print("   ✅ Login successful")
-        except:
+        except Exception as e:
+            logging.debug(f"Login check timeout: {e}")
             result["status"] = "ERROR"
             result["warnings"].append("Login failed - cookies may be expired")
             result["recommendation"] = "Please update your cookies in cookies_config.json"
@@ -322,8 +339,8 @@ def parse_metric(element):
         if 'K' in val: return int(float(val.replace('K', '')) * 1000)
         if 'M' in val: return int(float(val.replace('M', '')) * 1000000)
         return int(val)
-    except:
-        return 0
+    except Exception:
+        return 0  # Silent fail for missing metrics is acceptable
 
 def save_intermediate(tweets, filename):
     """Save progress incrementally (JSON + CSV)"""
@@ -340,20 +357,22 @@ def save_intermediate(tweets, filename):
             writer.writeheader()
             writer.writerows(tweets)
 
-def scrape_twitter(keyword, count=20, headless=False, output_filename=None, progress_callback=None):
+def scrape_twitter(keyword, count=20, headless=False, output_filename=None, progress_callback=None, filter_keywords=None):
     def log(msg):
-        print(msg, flush=True) # Ensure stdout is flushed for terminal
+        logging.info(msg)      # Log to file AND console (via handlers)
         if progress_callback:
             progress_callback(msg)
 
     log(f"🐦 Starting Selenium Scraper (Safe Mode)")
     log(f"   Keyword: {keyword}")
+    if filter_keywords:
+        log(f"   Filtering Strictness: ON (Must contain: {filter_keywords})")
     log(f"   Target: {count} tweets")
     
     driver = setup_driver(headless)
     tweets = []
+    seen_texts_hashes = set()  # Track seen tweets in this session to avoid re-processing
 
-    
     # Determine filename
     if output_filename:
         filename = output_filename
@@ -365,9 +384,8 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
         os.makedirs("outputs", exist_ok=True)
         filename = f"outputs/tweets_{clean_kw}.json"
 
-    
     try:
-        # 1. Login/Cookie Injection (Same as before)
+        # 1. Login/Cookie Injection
         log("🌍 Navigating to x.com...")
         driver.get("https://x.com/404")
         random_delay(2, 3)
@@ -377,7 +395,8 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
             driver.add_cookie({'name': name, 'value': value, 'domain': '.x.com', 'path': '/'})
             try:
                 driver.add_cookie({'name': name, 'value': value, 'domain': '.twitter.com', 'path': '/'})
-            except: pass
+            except Exception:
+                pass  # Twitter.com domain may not accept all cookies
 
         # 3. Search
         log("🔍 Going to search page...")
@@ -399,12 +418,67 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
         last_height = driver.execute_script("return document.body.scrollHeight")
         scroll_attempts = 0
         consecutive_no_new_tweets = 0
-        max_scroll_attempts = 100 # Maximum aggressive (was 50)
+        max_scroll_attempts = SCRAPER_CONFIG.get('max_scroll_attempts', 100)
+        
+        # ===== HUMAN SIMULATION MODE =====
+        # Random Activity Pattern: Variable speed to look natural
+        # Intelligent Pacing: Start slow, speed up gradually, slow down on rate limit
+        session_start_time = time.time()
+        tweets_this_session = 0
+        current_pace = "slow"  # slow -> medium -> fast (adapts over time)
+        rate_limit_warnings = 0
+        
+        def get_human_delay():
+            """Return delay based on current pace - simulates human behavior"""
+            nonlocal current_pace, rate_limit_warnings
+            
+            # Random variation factor (0.7 to 1.5x)
+            variation = random.uniform(0.7, 1.5)
+            
+            # Occasionally take a longer "distraction" pause (5% chance)
+            if random.random() < 0.05:
+                distraction_time = random.uniform(5, 15)
+                logging.info(f"   🧑 Human pause ({distraction_time:.1f}s)...")
+                return distraction_time
+            
+            # Base delays by pace
+            if current_pace == "slow":
+                base = random.uniform(3.0, 5.0)
+            elif current_pace == "medium":
+                base = random.uniform(2.0, 4.0)
+            else:  # fast
+                base = random.uniform(1.5, 3.0)
+            
+            # If rate limited recently, slow down
+            if rate_limit_warnings > 0:
+                base *= (1 + rate_limit_warnings * 0.5)
+            
+            return base * variation
+        
+        def update_pace():
+            """Intelligent pacing: adjust speed based on session progress"""
+            nonlocal current_pace, tweets_this_session
+            
+            elapsed_minutes = (time.time() - session_start_time) / 60
+            
+            # Start slow, gradually speed up (like a human warming up)
+            if elapsed_minutes < 2:
+                current_pace = "slow"
+            elif elapsed_minutes < 10:
+                current_pace = "medium"
+            else:
+                current_pace = "fast"
+            
+            # But slow down if we've collected a lot quickly
+            if tweets_this_session > 100 and elapsed_minutes < 5:
+                current_pace = "slow"  # Too fast, slow down!
+                logging.info("   ⚠️ Slowing down pace to avoid detection...")
         
         while len(tweets) < count and scroll_attempts < max_scroll_attempts:
             # Get articles
             articles = driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']")
             new_tweets_found = False
+            items_processed_this_loop = 0 # Track if we saw NEW content (even if filtered)
             
             for article in articles:
                 if len(tweets) >= count:
@@ -413,6 +487,14 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
                     # Parse Tweet
                     text_el = article.find_element(By.CSS_SELECTOR, "div[data-testid='tweetText']")
                     original_text = text_el.text
+                    
+                    # Create simple hash for uniqueness check within session
+                    # This prevents re-logging "Filtered" for the same tweet over and over
+                    text_hash = hash(original_text[:50] + str(len(original_text)))
+                    if text_hash in seen_texts_hashes:
+                        continue
+                    seen_texts_hashes.add(text_hash)
+                    items_processed_this_loop += 1
                     
                     user_el = article.find_element(By.CSS_SELECTOR, "div[data-testid='User-Name'] a")
                     username = user_el.get_attribute("href").split('/')[-1]
@@ -472,6 +554,21 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
                     # Filter out spam, ASCII art, and low-quality content
                     if not is_quality_text(original_text):
                         continue  # Skip this tweet
+                        
+                    # STRICT KEYWORD FILTERING
+                    if filter_keywords:
+                        text_lower = original_text.lower()
+                        # Check if any of the filter keywords are in the text
+                        matched = False
+                        for k in filter_keywords:
+                            # Simple substring match (case insensitive)
+                            if k.lower() in text_lower:
+                                matched = True
+                                break
+                        
+                        if not matched:
+                            log(f"   🗑️ Filtered: {original_text[:30]}... (No keyword match)")
+                            continue
                     
                     tweets.append({
                         "username": username,
@@ -492,25 +589,42 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
                         log(f"   Collected {len(tweets)}/{count} tweets...")
                         save_intermediate(tweets, filename)
                         
-                    # LONG BREAK every 100 tweets
-                    if len(tweets) % 100 == 0:
-                        log("   ☕ Taking a coffee break (10s) to be safe...")
-                        time.sleep(10)
+                    # Track tweets for pacing
+                    tweets_this_session += 1
+                    update_pace()  # Adjust pace based on progress
+                    
+                    # LONG BREAK every N tweets (configurable to avoid shadowban)
+                    coffee_interval = SCRAPER_CONFIG.get('coffee_break_interval', 50)
+                    coffee_duration = SCRAPER_CONFIG.get('coffee_break_duration', 15)
+                    if len(tweets) % coffee_interval == 0:
+                        log(f"   ☕ Taking a coffee break ({coffee_duration}s) to avoid rate limiting...")
+                        time.sleep(coffee_duration)
                         
                 except:
                     continue
             
             # Scroll logic
-            if new_tweets_found:
+            # If we found new tweets OR we processed new items (even if filtered), we are making progress
+            if new_tweets_found or items_processed_this_loop > 0:
                 consecutive_no_new_tweets = 0
                 scroll_attempts = 0
             else:
                 consecutive_no_new_tweets += 1
             
-            # Scroll down
-            scroll_px = random.randint(800, 1200) # Random scroll amount
+            # Scroll down with human-like randomness
+            scroll_px = random.randint(600, 1000) # Smaller, more natural scroll
             driver.execute_script(f"window.scrollBy(0, {scroll_px});")
-            random_delay(1.5, 3.0) # Variable delay
+            
+            # Use intelligent human delay:
+            # If we found something good: act like a human reading
+            # If we just filtered trash: fast scroll (scan mode)
+            if new_tweets_found:
+                human_wait = get_human_delay()
+            else:
+                # FAST MODE: If filtering heavily, don't wait 5s to look at trash
+                human_wait = random.uniform(1.0, 2.0)
+            
+            time.sleep(human_wait)
             
             # Check if stuck
             new_height = driver.execute_script("return document.body.scrollHeight")
@@ -523,6 +637,7 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
                     log(f"   🔄 Retrying scroll (Attempt {scroll_attempts}/{max_scroll_attempts})...")
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                     time.sleep(3)
+                    rate_limit_warnings += 1  # Track as potential rate limit
                 
                 # SMART RETRY: Refresh page every 20 failed attempts
                 if consecutive_no_new_tweets >= 10 and scroll_attempts % 20 == 0:
@@ -550,6 +665,7 @@ def scrape_twitter(keyword, count=20, headless=False, output_filename=None, prog
         
     except Exception as e:
         print(f"\n❌ Error: {e}")
+        logging.error(f"Scraper Error: {e}")
         return tweets
         
     finally:

@@ -1,0 +1,56 @@
+{
+  "base_keyword": "banjir sumatra",
+  "variations": [
+    "#pulihkanpertaniansumatra",
+    "#sumatra",
+    "berita banjir sumatra",
+    "banjir sumatra",
+    "#banjirsumatra",
+    "update banjir sumatra"
+  ],
+  "date_chunks": [
+    [
+      "2025-11-19",
+      "2025-11-26"
+    ],
+    [
+      "2025-11-26",
+      "2025-12-03"
+    ],
+    [
+      "2025-12-03",
+      "2025-12-10"
+    ],
+    [
+      "2025-12-10",
+      "2025-12-17"
+    ],
+    [
+      "2025-12-17",
+      "2025-12-24"
+    ],
+    [
+      "2025-12-24",
+      "2025-12-31"
+    ],
+    [
+      "2025-12-31",
+      "2026-01-07"
+    ],
+    [
+      "2026-01-07",
+      "2026-01-14"
+    ],
+    [
+      "2026-01-14",
+      "2026-01-18"
+    ]
+  ],
+  "all_tweets": [],
+  "seen_urls": [],
+  "current_chunk_idx": 0,
+  "total_chunks": 54,
+  "start_date": "",
+  "end_date": "",
+  "worker_mode": 3
+}

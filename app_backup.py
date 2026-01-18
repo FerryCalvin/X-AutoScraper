@@ -1,39 +1,19 @@
-"""
-AutoScraper - Twitter/X Data Collection Tool
-Main Flask Application
-
-Refactored to use modular structure:
-- config.py: Configuration loading
-- services/: Job store, checkpoint
-- routes/: API endpoints
-- utils/: Logging, cleanup
-"""
 import threading
 import uuid
 import time
 import os
 import json
-import csv
-import re
+import csv # Added for CSV operations
+import re # Added for Smart Mode regex
+import yaml # Config file support
 import logging
 import signal
+from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 
-# Import new modular components
-from config import CONFIG, SCRAPER, WORKERS, OUTPUT, RATE_LIMIT
-from services.job_store import (
-    JOBS, JOBS_LOCK, add_job, update_job_status, 
-    get_all_jobs, remove_job, get_job
-)
-from services.checkpoint import (
-    save_checkpoint, load_checkpoint, delete_checkpoint, list_pending_checkpoints
-)
-from utils.logging_setup import setup_logging, get_recent_logs, LOG_BUFFER
-from utils.cleanup import cleanup_old_outputs, cleanup_temp_files, ensure_output_dir
-
-# Import scrapers
+# Import our scrapers
 import scraper_selenium
 import scraper_parallel
 
@@ -69,18 +49,184 @@ signal.signal(signal.SIGINT, graceful_shutdown)
 signal.signal(signal.SIGTERM, graceful_shutdown)
 
 # ===================
-# INITIALIZATION
+# CONFIG LOADER
 # ===================
+def load_config():
+    """Load configuration from YAML file"""
+    config_path = 'config.yaml'
+    default_config = {
+        'scraper': {'default_count': 100, 'scroll_delay_min': 1.5, 'scroll_delay_max': 4.0},
+        'workers': {'default_mode': 3, 'parallel_threshold': 500},
+        'logging': {'enabled': True, 'file': 'logs/autoscraper.log', 'level': 'INFO'},
+        'output': {'directory': 'outputs', 'format': 'csv'},
+        'rate_limit': {'max_requests_per_minute': 30, 'warning_threshold': 20, 'danger_threshold': 25}
+    }
+    
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            print(f"⚠️ Error loading config: {e}. Using defaults.")
+            return default_config
+    return default_config
 
-# Setup logging (imported from utils.logging_setup)
+CONFIG = load_config()
+
+# ===================
+# LOGGING SETUP
+# ===================
+def setup_logging():
+    """Setup file and console logging"""
+    log_config = CONFIG.get('logging', {})
+    
+    if not log_config.get('enabled', True):
+        return
+    
+    # Create logs directory
+    log_file = log_config.get('file', 'logs/autoscraper.log')
+    log_dir = os.path.dirname(log_file)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    # Setup rotating file handler
+    log_level = getattr(logging, log_config.get('level', 'INFO').upper(), logging.INFO)
+    max_bytes = log_config.get('max_size_mb', 10) * 1024 * 1024
+    backup_count = log_config.get('backup_count', 5)
+    
+    file_handler = RotatingFileHandler(
+        log_file, 
+        maxBytes=max_bytes, 
+        backupCount=backup_count,
+        encoding='utf-8'
+    )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s | %(levelname)s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    ))
+    
+    # Setup root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.addHandler(file_handler)
+    
+    # Also log to console
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(logging.Formatter('%(message)s'))
+    root_logger.addHandler(console_handler)
+    
+    logging.info("🚀 AutoScraper started - Logging initialized")
+
 setup_logging()
 
-# Run cleanup on startup (imported from utils.cleanup)
-cleanup_old_outputs(max_age_days=3)
-ensure_output_dir()
+# ===================
+# LIVE LOG BUFFER (for UI)
+# ===================
+LOG_BUFFER = []
+LOG_BUFFER_MAX = 100  # Keep last 100 log entries
+
+class BufferHandler(logging.Handler):
+    """Custom handler to store logs in memory for live viewing"""
+    def emit(self, record):
+        global LOG_BUFFER
+        log_entry = self.format(record)
+        LOG_BUFFER.append({
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'level': record.levelname,
+            'message': log_entry
+        })
+        # Keep buffer size limited
+        if len(LOG_BUFFER) > LOG_BUFFER_MAX:
+            LOG_BUFFER = LOG_BUFFER[-LOG_BUFFER_MAX:]
+
+# Add buffer handler
+buffer_handler = BufferHandler()
+buffer_handler.setFormatter(logging.Formatter('%(message)s'))
+logging.getLogger().addHandler(buffer_handler)
 
 # ===================
-# RATE LIMIT TRACKING (kept here for backward compat, will move to routes/system.py later)
+# AUTO CLEANUP OLD FILES
+# ===================
+def cleanup_old_outputs(max_age_days=3):
+    """Delete output files older than max_age_days"""
+    output_dir = CONFIG.get('output', {}).get('directory', 'outputs')
+    if not os.path.exists(output_dir):
+        return
+    
+    import time
+    now = time.time()
+    max_age_seconds = max_age_days * 24 * 60 * 60
+    deleted_count = 0
+    
+    for filename in os.listdir(output_dir):
+        filepath = os.path.join(output_dir, filename)
+        if os.path.isfile(filepath):
+            file_age = now - os.path.getmtime(filepath)
+            if file_age > max_age_seconds:
+                try:
+                    os.remove(filepath)
+                    deleted_count += 1
+                except Exception as e:
+                    pass  # Ignore errors
+    
+    if deleted_count > 0:
+        logging.info(f"🧹 Auto-cleanup: Deleted {deleted_count} files older than {max_age_days} days")
+
+# Run cleanup on startup
+cleanup_old_outputs(max_age_days=3)
+
+# ===================
+# CHECKPOINT SYSTEM (for sleep/resume)
+# ===================
+CHECKPOINT_DIR = 'checkpoints'
+
+def save_checkpoint(job_id, data):
+    """Save checkpoint for resumable scraping"""
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    checkpoint_file = f"{CHECKPOINT_DIR}/{job_id}.json"
+    with open(checkpoint_file, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    logging.info(f"💾 Checkpoint saved: {len(data.get('all_tweets', []))} tweets, chunk {data.get('current_chunk_idx', 0)+1}")
+
+def load_checkpoint(job_id):
+    """Load checkpoint if exists"""
+    checkpoint_file = f"{CHECKPOINT_DIR}/{job_id}.json"
+    if os.path.exists(checkpoint_file):
+        with open(checkpoint_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        logging.info(f"📂 Checkpoint loaded: resuming from chunk {data.get('current_chunk_idx', 0)+1}")
+        return data
+    return None
+
+def delete_checkpoint(job_id):
+    """Delete checkpoint after successful completion"""
+    checkpoint_file = f"{CHECKPOINT_DIR}/{job_id}.json"
+    if os.path.exists(checkpoint_file):
+        os.remove(checkpoint_file)
+        logging.info(f"🗑️ Checkpoint deleted for job {job_id}")
+
+def list_pending_checkpoints():
+    """List all pending checkpoints for resume"""
+    if not os.path.exists(CHECKPOINT_DIR):
+        return []
+    checkpoints = []
+    for f in os.listdir(CHECKPOINT_DIR):
+        if f.endswith('.json'):
+            job_id = f.replace('.json', '')
+            cp = load_checkpoint(job_id)
+            if cp:
+                checkpoints.append({
+                    'job_id': job_id,
+                    'keyword': cp.get('base_keyword', 'Unknown'),
+                    'progress': f"{cp.get('current_chunk_idx', 0)+1}/{cp.get('total_chunks', '?')}",
+                    'tweets_collected': len(cp.get('all_tweets', []))
+                })
+    return checkpoints
+
+# ===================
+# RATE LIMIT TRACKING
 # ===================
 REQUEST_TIMESTAMPS = []  # List of timestamps for rate calculation
 
@@ -168,9 +314,46 @@ if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
 # ===================
-# JOB STORE - imported from services/job_store.py
-# Functions available: JOBS, JOBS_LOCK, add_job, update_job_status, get_all_jobs, remove_job, get_job
+# IN-MEMORY JOB STORE (replaces SQLite)
 # ===================
+JOBS = {}  # {job_id: {keyword, target_count, status, progress, result_file, created_at, worker_mode}}
+JOBS_LOCK = threading.Lock()
+
+def add_job(job_id, keyword, target_count, worker_mode=3):
+    """Add a new job to in-memory store"""
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            'id': job_id,
+            'keyword': keyword,
+            'target_count': target_count,
+            'status': 'RUNNING',
+            'progress': 'Starting...',
+            'result_file': None,
+            'created_at': datetime.now().isoformat(),
+            'worker_mode': worker_mode
+        }
+    logging.info(f"📝 Job added: {job_id} ({keyword})")
+
+def update_job_status(job_id, status, progress=None, result_file=None):
+    """Update job status in memory"""
+    with JOBS_LOCK:
+        if job_id in JOBS:
+            JOBS[job_id]['status'] = status
+            if progress:
+                JOBS[job_id]['progress'] = progress
+            if result_file:
+                JOBS[job_id]['result_file'] = result_file
+
+def get_all_jobs():
+    """Get all jobs for UI display"""
+    with JOBS_LOCK:
+        return list(JOBS.values())
+
+def remove_job(job_id):
+    """Remove job from memory (after completion)"""
+    with JOBS_LOCK:
+        if job_id in JOBS:
+            del JOBS[job_id]
 
 def init_db():
     """Compatibility function - no-op for in-memory store"""
