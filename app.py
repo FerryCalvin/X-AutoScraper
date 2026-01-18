@@ -35,7 +35,6 @@ from utils.cleanup import cleanup_old_outputs, cleanup_temp_files, ensure_output
 
 # Import scrapers
 import scraper_selenium
-import scraper_parallel
 
 # ===================
 # GRACEFUL SHUTDOWN
