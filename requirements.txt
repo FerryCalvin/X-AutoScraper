@@ -13,3 +13,5 @@ scikit-learn              # Topic modeling (LDA)
 # Optional: AI-powered sentiment (install separately if needed)
 # transformers            # IndoBERT sentiment (500MB download)
 # torch                   # PyTorch for transformers
+
+fake-useragent            # For rotating User-Agent strings to avoid detection

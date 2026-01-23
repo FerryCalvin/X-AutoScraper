@@ -60,3 +60,6 @@ Buka browser di `http://localhost:5000`
 
 ## ⚠️ Catatan Skripsi
 Project ini menggunakan teknik Selenium Automation yang mensimulasikan browser manusia. Gunakan dengan bijak dan *delay* yang wajar untuk menghindari suspend akun.
+
+## KILL SWITCH
+taskkill /F /IM python.exe

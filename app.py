@@ -25,7 +25,7 @@ from flask import Flask, render_template, request, jsonify, send_file, redirect,
 from config import CONFIG, SCRAPER, WORKERS, OUTPUT, RATE_LIMIT
 from services.job_store import (
     JOBS, JOBS_LOCK, add_job, update_job_status, 
-    get_all_jobs, remove_job, get_job
+    get_all_jobs, remove_job, get_job, cancel_job, is_cancelled
 )
 from services.checkpoint import (
     save_checkpoint, load_checkpoint, delete_checkpoint, list_pending_checkpoints
@@ -34,7 +34,13 @@ from utils.logging_setup import setup_logging, get_recent_logs, LOG_BUFFER
 from utils.cleanup import cleanup_old_outputs, cleanup_temp_files, ensure_output_dir
 
 # Import scrapers
-import scraper_selenium
+from scrapers import TwitterScraper, GoogleScraper
+
+# Initialize scrapers
+# We can initialize multiple scrapers here
+twitter_scraper = TwitterScraper()
+google_scraper = GoogleScraper()
+
 
 # ===================
 # GRACEFUL SHUTDOWN
@@ -247,15 +253,10 @@ def check_batch_completion(batch_id):
                 print(f"✅ Merged file ready: {merged_path}")
                 
                 # Add a "System Job" to DB so it shows in UI
-                conn = get_db()
-                c = conn.cursor()
+                # Add a "System Job" to DB so it shows in UI
                 sys_job_id = f"batch-{batch_id[:8]}"
-                c.execute(
-                    "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress, result_file) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (sys_job_id, "📦 COMBINED/MERGED RESULT", len(all_data), 'COMPLETED', datetime.now(), f'Merged {len(valid_files)} files', merged_filename)
-                )
-                conn.commit()
-                conn.close()
+                add_job(sys_job_id, "📦 COMBINED/MERGED RESULT", len(all_data), 1)
+                update_job_status(sys_job_id, 'COMPLETED', f'Merged {len(valid_files)} files', merged_filename)
                 
             # Cleanup
             del BATCH_GROUPS[batch_id]
@@ -266,11 +267,7 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
     with job_lock: # Wait for other jobs to finish before starting
         print(f"🧵 [Thread] Starting job {job_id} for '{keyword}' (Smart: {smart_mode}, Workers: {worker_mode})")
         
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE jobs SET status = ? WHERE id = ?", ('RUNNING', job_id))
-        conn.commit()
-        conn.close()
+        update_job_status(job_id, 'RUNNING')
 
         filename_abs = None # Initialize
 
@@ -284,10 +281,11 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
                 
                 # 2. Discovery Scrape (Larger sample for better hashtag discovery)
                 print(f"🧠 Smart Mode: Scanning for topics related to '{keyword}'...")
-                discovery_tweets = scraper_selenium.scrape_twitter(
+                discovery_tweets = twitter_scraper.scrape(
                     keyword, 
                     count=100, # INCREASED: Larger sample for better hashtag discovery (was 50)
-                    headless=True
+                    headless=True,
+                    is_cancelled_func=lambda: is_cancelled(job_id)
                 )
                 
                 # 3. Analyze Hashtags
@@ -351,11 +349,12 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
                     
                     search_query = f"{final_keyword} since:{chunk_start} until:{chunk_end}"
                     
-                    chunk_tweets = scraper_selenium.scrape_twitter(
+                    chunk_tweets = twitter_scraper.scrape(
                         keyword=search_query, 
                         count=count // len(date_chunks), # Distribute count across chunks
                         headless=True,
-                        progress_callback=lambda msg: update_job_status(job_id, 'RUNNING', f'Chunk {i+1}: {msg}')
+                        progress_callback=lambda msg: update_job_status(job_id, 'RUNNING', f'Chunk {i+1}: {msg}'),
+                        is_cancelled_func=lambda: is_cancelled(job_id)
                     )
                     
                     if chunk_tweets:
@@ -390,52 +389,29 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
                 
             # --- REGULAR SCRAPING (No chunking needed) ---
             else:
-                # Determine strategy based on count AND worker_mode
-                use_parallel = count > 500 or worker_mode > 1
-            
-                if use_parallel:
-                    workers = worker_mode
-                    print(f"🚀 Using Parallel Strategy for {count} tweets (Workers: {workers})")
-                    update_job_status(job_id, 'RUNNING', f'Running parallel scraper ({workers} workers)')
+                # Standard Scraper (Safe Mode)
+                print(f"🐢 Using Standard Strategy for {count} tweets")
+                update_job_status(job_id, 'RUNNING', 'Starting browser (Safe Mode)...')
+                    
+                # Append dates to keyword for standard scraper logic (Twitter search syntax)
+                search_query = final_keyword
+                if start_date:
+                    search_query += f" since:{start_date}"
+                if end_date:
+                    search_query += f" until:{end_date}"
                 
-                try:
-                    kwargs = {
-                        "keyword": final_keyword, # Use final_keyword here
-                        "total_count": count,
-                        "workers": workers,
-                        "output_dir": OUTPUT_DIR
-                    }
-                    if start_date: kwargs["start_date"] = start_date
-                    if end_date: kwargs["end_date"] = end_date 
-
-                    filename_abs = scraper_parallel.run_parallel_job(**kwargs)
-                except Exception as e:
-                        print(f"Parallel scraper error: {e}")
-                        raise e
-                        
-                else:
-                    # Standard Scraper (Safe Mode for small/medium counts)
-                    print(f"🐢 Using Standard Strategy for {count} tweets")
-                    update_job_status(job_id, 'RUNNING', 'Starting browser (Safe Mode)...')
-                    
-                    # Append dates to keyword for standard scraper logic (Twitter search syntax)
-                    search_query = final_keyword
-                    if start_date:
-                        search_query += f" since:{start_date}"
-                    if end_date:
-                        search_query += f" until:{end_date}"
-                    
-                    # Define output filename
-                    filename_abs = f"{os.getcwd()}/{OUTPUT_DIR}/job_{job_id}_{keyword.replace(' ', '_')}.json"
-                    
-                    # Run Standard with Callback
-                    tweets = scraper_selenium.scrape_twitter(
-                        keyword=search_query, 
-                        count=count, 
-                        headless=True,
-                        output_filename=filename_abs,
-                        progress_callback=on_progress
-                    )
+                # Define output filename
+                filename_abs = f"{os.getcwd()}/{OUTPUT_DIR}/job_{job_id}_{keyword.replace(' ', '_')}.json"
+                
+                # Run Standard with Callback
+                tweets = twitter_scraper.scrape(
+                    keyword=search_query, 
+                    count=count, 
+                    headless=True,
+                    output_filename=filename_abs,
+                    progress_callback=on_progress,
+                    is_cancelled_func=lambda: is_cancelled(job_id)
+                )
                 
             result_tweets_count = 0 
             if filename_abs and os.path.exists(filename_abs):
@@ -455,6 +431,58 @@ def run_scraper_thread(job_id, keyword, count, start_date=None, end_date=None, s
                 filename = os.path.basename(filename_abs)
             else:
                 filename = None
+                
+            # === GOOGLE FALLBACK LOGIC ===
+            # Verify actual count and fill gap
+            current_count = 0
+            existing_data = []
+            
+            if filename_abs and os.path.exists(filename_abs):
+                try:
+                    with open(filename_abs, 'r', encoding='utf-8') as f:
+                        if filename_abs.endswith('.json'):
+                            existing_data = json.load(f)
+                            current_count = len(existing_data)
+                        elif filename_abs.endswith('.csv'):
+                            reader = csv.DictReader(f)
+                            existing_data = list(reader)
+                            current_count = len(existing_data)
+                except Exception as e:
+                    print(f"⚠️ Error reading output for count: {e}")
+
+            if current_count < count and filename_abs:
+                shortfall = count - current_count
+                print(f"⚠️ Yield Warning: Got {current_count}/{count}. Filling gap with Google ({shortfall} items)...")
+                update_job_status(job_id, 'RUNNING', f"Scraping Google for {shortfall} items...")
+                
+                try:
+                    google_results = google_scraper.scrape(keyword, count=shortfall)
+                    if google_results:
+                        # Append and save
+                        existing_data.extend(google_results)
+                        
+                        # Write back
+                        if filename_abs.endswith('.json'):
+                            with open(filename_abs, 'w', encoding='utf-8') as f:
+                                json.dump(existing_data, f, indent=2, ensure_ascii=False)
+                        elif filename_abs.endswith('.csv'):
+                            # Handle mixed keys
+                            keys = set()
+                            for item in existing_data:
+                                keys.update(item.keys())
+                            fieldnames = sorted(list(keys))
+                            
+                            with open(filename_abs, 'w', newline='', encoding='utf-8') as f:
+                                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                                writer.writeheader()
+                                writer.writerows(existing_data)
+                                
+                        current_count = len(existing_data)
+                        print(f"✅ Google fallback successful. Total now: {current_count}")
+                except Exception as e:
+                    print(f"❌ Google fallback failed: {e}")
+            
+            result_tweets_count = current_count
         
             # Update Final Status
             if result_tweets_count > 0:
@@ -525,6 +553,19 @@ def create_job():
     if not raw_keyword:
         return jsonify({'error': 'Keyword is required'}), 400
         
+    # Prevent duplicate jobs for the same keyword (case-insensitive)
+    current_jobs = get_all_jobs()
+    for j in current_jobs:
+        # Normalize both keywords to lowercase for comparison
+        existing_kw = j['keyword'].replace('🚀 ', '').replace(' (Auto-Expand)', '').lower()
+        new_kw = raw_keyword.lower()
+        if existing_kw == new_kw and j['status'] in ['RUNNING', 'PENDING']:
+             return jsonify({
+                 'job_id': j['id'], 
+                 'status': j['status'], 
+                 'message': f'Job for {raw_keyword} is already running'
+             })
+             
     # Handle Comma-Separated Keywords - ALWAYS combine with OR
     keywords = [k.strip() for k in raw_keyword.split(',') if k.strip()]
     
@@ -535,7 +576,7 @@ def create_job():
         # Base keyword for display
         base_keyword = keywords[0] if len(keywords) == 1 else " OR ".join(keywords)
         
-        # Step 1: Start with base variations
+        # Step 1: Start with base variations (CLEAN START)
         variations = []
         for kw in keywords:
             if kw not in variations:
@@ -543,85 +584,97 @@ def create_job():
             # Add hashtag version
             if not kw.startswith('#'):
                 variations.append(f"#{kw.replace(' ', '')}")
-            # Add common prefixes (works for any topic)
-            if not kw.startswith('#') and len(kw.split()) <= 2:
-                variations.append(f"berita {kw}")
-                variations.append(f"update {kw}")
-        
-        # CREATE SINGLE PARENT JOB FIRST (before discovery)
-        parent_job_id = str(uuid.uuid4())
-        add_job(parent_job_id, f"🚀 {base_keyword} (Auto-Expand)", count, worker_mode)
-        update_job_status(parent_job_id, 'RUNNING', 'Discovery Phase: Finding related hashtags...')
-        
-        # Step 2: DYNAMIC DISCOVERY - Scrape sample tweets to find related hashtags
-        print(f"🧠 Dynamic Discovery: Scanning for related hashtags...")
-        
-        discovery_hashtags = []
-        try:
-            # Quick scrape to find trending hashtags for this topic
-            discovery_tweets = scraper_selenium.scrape_twitter(
-                base_keyword,
-                count=100,  # Sample size for discovery
-                headless=True
-            )
             
-            if discovery_tweets:
-                # Extract all hashtags from discovery tweets
-                from collections import Counter
-                all_hashtags = []
-                for tweet in discovery_tweets:
-                    text = tweet.get('text', '')
-                    hashtags = re.findall(r'#\w+', text)
-                    all_hashtags.extend([h.lower() for h in hashtags])
-                
-                # Get top 20 most common hashtags (we'll filter later)
-                hashtag_counts = Counter(all_hashtags)
-                candidate_hashtags = [tag for tag, count in hashtag_counts.most_common(20) if count >= 2]
-                
-                # RELEVANCE FILTER: Only keep hashtags related to original keywords
-                keyword_words = []
-                for kw in keywords:
-                    # Extract individual words from keyword
-                    words = re.findall(r'\w+', kw.lower())
-                    keyword_words.extend(words)
-                keyword_words = list(set(keyword_words))  # Unique words
-                
-                def is_relevant_hashtag(tag):
-                    """Check if hashtag is related to the keywords"""
-                    tag_clean = tag.replace('#', '').lower()
-                    
-                    # Check if any keyword word appears in the hashtag
-                    for word in keyword_words:
-                        if len(word) >= 3 and word in tag_clean:  # Word must be at least 3 chars
-                            return True
-                        if tag_clean in word:  # Or hashtag is part of keyword
-                            return True
-                    return False
-                
-                # Filter to only relevant hashtags
-                discovery_hashtags = [tag for tag in candidate_hashtags if is_relevant_hashtag(tag)]
-                
-                print(f"  🔍 Found {len(candidate_hashtags)} hashtags, {len(discovery_hashtags)} relevant: {discovery_hashtags[:5]}...")
-                
-                # Add discovered hashtags to variations
-                for tag in discovery_hashtags:
-                    if tag not in [v.lower() for v in variations]:
-                        variations.append(tag)
-        except Exception as e:
-            print(f"  ⚠️ Discovery failed: {e}, continuing with base variations")
-        
-        # Step 3: Limit and prepare
-        variations = list(set(variations))[:20]  # Increased to 20 for better coverage
-        # NOTE: count_per_variation will be recalculated after we know the number of date chunks
-        
-        print(f"🔄 Auto-Expand: {len(variations)} keywords (including {len(discovery_hashtags)} discovered)")
+            # REMOVED ALL HARDCODED PREFIXES (User request: "Automatic for all genres")
+            # We will rely entirely on DYNAMIC DISCOVERY below to find context words.
         
         # CREATE SINGLE PARENT JOB (this is what user sees)
         parent_job_id = str(uuid.uuid4())
         add_job(parent_job_id, f"🚀 {base_keyword} (Auto-Expand)", count, worker_mode)
+        update_job_status(parent_job_id, 'RUNNING', 'Initializing...')
         
         # Start single background thread that processes all variations internally
         def run_auto_expand_batch():
+            nonlocal variations
+            
+            # Step 2: DYNAMIC DISCOVERY - Contextual Word Analysis
+            update_job_status(parent_job_id, 'RUNNING', 'Discovery Phase: Analyzing context & hashtags...')
+            print(f"🧠 Dynamic Discovery: Scanning for context...")
+            
+            discovery_hashtags = []
+            discovery_words = []
+            
+            try:
+                # 1. Scrape sample
+                discovery_tweets = twitter_scraper.scrape(
+                    base_keyword,
+                    count=250, 
+                    headless=True
+                )
+                
+                if discovery_tweets:
+                    from collections import Counter
+                    all_text = ""
+                    all_hashtags = []
+                    
+                    for tweet in discovery_tweets:
+                        text = tweet.get('text', '')
+                        all_text += " " + text
+                        hashtags = re.findall(r'#\w+', text)
+                        all_hashtags.extend([h.lower() for h in hashtags])
+                    
+                    # 2. Extract Top Hashtags
+                    hashtag_counts = Counter(all_hashtags)
+                    discovery_hashtags = [tag for tag, count in hashtag_counts.most_common(30) if count >= 2]
+                    
+                    # 3. Extract Top Context Words (The "Automatic" Part)
+                    # Simple Stopwords List (Indonesian + English common)
+                    STOPWORDS = {
+                        'dan', 'yang', 'di', 'ke', 'dari', 'ini', 'itu', 'untuk', 'pada', 'adalah', 
+                        'sebagai', 'dengan', 'karena', 'yg', 'gak', 'bisa', 'ada', 'lagi', 'tapi',
+                        'kalo', 'ya', 'mau', 'udah', 'sdh', 'tdk', 'aja', 'saja', 'juga', 'akan',
+                        'bukan', 'sudah', 'atau', 'saat', 'oleh', 'dalam', 'tidak', 'tak', 'dgn',
+                        'the', 'and', 'to', 'of', 'in', 'is', 'for', 'on', 'with', 'at', 'by', 
+                        'http', 'https', 'com', 'co', 'id', 'www', 'rt' 
+                    }
+                    
+                    # Clean and tokenize
+                    words = re.findall(r'\w+', all_text.lower())
+                    filtered_words = [
+                        w for w in words 
+                        if w not in STOPWORDS 
+                        and len(w) > 3 
+                        and not w.isdigit()
+                        and w not in base_keyword.lower() # Don't repeat query words
+                    ]
+                    
+                    # Find most common adjacent/context words (e.g., 'surut', 'macet', 'korban')
+                    word_counts = Counter(filtered_words)
+                    top_words = [w for w, c in word_counts.most_common(20)] # Top 20 context words
+                    
+                    print(f"  🧠 Found context words: {top_words}")
+                    
+                    # GENERATE DYNAMIC VARIATIONS
+                    # Combine original keyword with discovered context words
+                    for word in top_words:
+                        new_var = f"{base_keyword} {word}"
+                        if new_var not in variations:
+                            variations.append(new_var)
+                            
+                    # Add hashtags
+                    for tag in discovery_hashtags:
+                        if tag not in [v.lower() for v in variations]:
+                            variations.append(tag)
+                            
+            except Exception as e:
+                print(f"  ⚠️ Discovery failed: {e}, continuing with base variations")
+            
+            # Step 3: Limit and prepare
+            variations = list(set(variations))[:60]  # Increased to 60 for aggressive coverage
+            
+            print(f"🔄 Auto-Expand: {len(variations)} keywords (including {len(discovery_hashtags)} discovered)")
+            update_job_status(parent_job_id, 'RUNNING', f'Processing {len(variations)} keyword variations...')
+            
             all_tweets = []
             seen_urls = set()
             completed_count = 0
@@ -660,9 +713,9 @@ def create_job():
                     print(f"  ⚠️ Date parsing error: {e}, using as single range")
                     date_chunks = [(start_date, end_date)]
             else:
-                # NO DATES: Auto-generate from last 60 days
+                # NO DATES: Auto-generate from last 120 days (extended for more data)
                 chunk_end = datetime.now()
-                chunk_start = chunk_end - timedelta(days=60)
+                chunk_start = chunk_end - timedelta(days=120)
                 
                 # Create weekly chunks
                 current = chunk_start
@@ -671,7 +724,7 @@ def create_job():
                     date_chunks.append((current.strftime('%Y-%m-%d'), next_chunk.strftime('%Y-%m-%d')))
                     current = next_chunk
                 
-                print(f"  📅 Auto date chunking: {len(date_chunks)} weekly periods (last 60 days)")
+                print(f"  📅 Auto date chunking: {len(date_chunks)} weekly periods (last 120 days)")
             
             # Build list of all work items (variation + chunk combinations)
             work_items = []
@@ -743,8 +796,12 @@ def create_job():
                         else:
                             logging.info(f"  �🔧 [W{worker_id}] [{work_idx+1}/{total_work}] Scraping: {variation}{chunk_info}")
                         
-                        # Build search query with dates
-                        search_query = variation
+                        # Build search query with dates and QUALITY FILTERS
+                        # BALANCE: Quality vs Volume
+                        # - Removed -filter:links (too aggressive, blocks 60-80% of tweets)
+                        # - Added -is:reply (removes reply chains, keeps original posts)
+                        # - Added lang:id (prioritize Indonesian tweets)
+                        search_query = f"{variation} -is:reply lang:id"
                         if chunk_start_date:
                             search_query += f" since:{chunk_start_date}"
                         if chunk_end_date:
@@ -754,13 +811,31 @@ def create_job():
                         # This ensures we don't capture unrelated tweets just because they have "2024"
                         filter_kws = [w for w in variation.split() if not w.isdigit() and len(w) > 2]
                         
+                        # Dynamic Quota Strategy:
+                        # If previous chunks yielded few results, ask for more from remaining chunks
+                        # to try and hit the total target.
+                        current_total = len(all_tweets)
+                        remaining_needed = count - current_total
+                        remaining_chunks = len(pending_work) - i
+                        
+                        if remaining_needed <= 0:
+                            tweets_per_chunk = 0 # Target reached
+                        else:
+                            import math
+                            # Distribute remaining need across remaining chunks
+                            tweets_per_chunk = math.ceil(remaining_needed / max(1, remaining_chunks))
+                            # MINIMUM: Always try for at least 50 tweets per chunk (aggressive scraping)
+                            tweets_per_chunk = max(50, tweets_per_chunk)
+                        
+                        logging.info(f"  📊 [W{worker_id}] Quota Update: Need {remaining_needed} more. Asking for {tweets_per_chunk} from this chunk.")
+
                         # Run scraper for this variation + date chunk
-                        # Use calculated tweets_per_chunk (not the old 200 hardcode)
-                        tweets = scraper_selenium.scrape_twitter(
+                        tweets = twitter_scraper.scrape(
                             search_query,
                             count=tweets_per_chunk,
                             headless=True,
-                            filter_keywords=filter_kws
+                            filter_keywords=filter_kws,
+                            is_cancelled_func=lambda: is_cancelled(parent_job_id)
                         )
                         
                         new_unique = 0
@@ -803,83 +878,130 @@ def create_job():
                 stagger_delay = 10 if num_workers > 1 else 0
                 logging.info(f"  ⏱️ Anti-shadowban mode: {num_workers} workers with {stagger_delay}s delay between each")
                 
-                with ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix='Worker') as executor:
-                    ACTIVE_EXECUTORS.append(executor)  # Register for Ctrl+C cleanup
-                    futures = {}
-                    
-                    # Submit work items with staggered delay to prevent shadowban
-                    for i, (idx, work) in enumerate(pending_work):
-                        # Check if shutdown requested
-                        if SHUTDOWN_FLAG.is_set():
-                            logging.info("  🛑 Shutdown requested, stopping...")
-                            break
+                try:
+                    with ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix='Worker') as executor:
+                        ACTIVE_EXECUTORS.append(executor)  # Register for Ctrl+C cleanup
+                        futures = {}
                         
-                        # Stagger launch: 10s delay between worker starts (except first)
-                        if i > 0 and i < num_workers:
-                            logging.info(f"  ⏳ Waiting {stagger_delay}s before launching Worker {i+1}...")
-                            time.sleep(stagger_delay)
+                        # Submit work items with staggered delay to prevent shadowban
+                        for i, (idx, work) in enumerate(pending_work):
+                            # Check if shutdown requested
+                            if SHUTDOWN_FLAG.is_set():
+                                logging.info("  🛑 Shutdown requested, stopping...")
+                                break
+                            
+                            # Stagger launch: 10s delay between worker starts (except first)
+                            if i > 0 and i < num_workers:
+                                logging.info(f"  ⏳ Waiting {stagger_delay}s before launching Worker {i+1}...")
+                                time.sleep(stagger_delay)
+                            
+                            future = executor.submit(scrape_single_work_item, idx, work)
+                            futures[future] = idx
                         
-                        future = executor.submit(scrape_single_work_item, idx, work)
-                        futures[future] = idx
-                    
-                    # Process results as they complete
-                    for future in as_completed(futures):
-                        result = future.result()
+                        # Process results as they complete
+                        for future in as_completed(futures):
+                            result = future.result()
+                            
+                            # Update job status
+                            update_job_status(parent_job_id, 'RUNNING', f'Completed {completed_items[0]+1}/{total_work}, {len(all_tweets)} tweets collected')
+                            
+                            # EARLY STOP: Check if safety cap reached (only in capped mode)
+                            if not unlimited_mode and len(all_tweets) >= safety_cap:
+                                logging.info(f"  🛑 Safety cap reached ({safety_cap} tweets), stopping early!")
+                                # Cancel remaining futures
+                                for f in futures:
+                                    f.cancel()
+                                break
+                            
+                            # Save checkpoint periodically (every 5 completions)
+                            if completed_items[0] % 5 == 0:
+                                with data_lock:
+                                    save_checkpoint(parent_job_id, {
+                                        'base_keyword': base_keyword,
+                                        'variations': variations,
+                                        'date_chunks': date_chunks,
+                                        'all_tweets': all_tweets,
+                                        'seen_urls': list(seen_urls),
+                                        'current_chunk_idx': completed_items[0],
+                                        'total_chunks': total_work,
+                                        'start_date': start_date,
+                                        'end_date': end_date,
+                                        'worker_mode': worker_mode  # Added for resume
+                                    })
+                
+                    # === MULTI-PLATFORM FALLBACK (Google) ===
+                    # If Twitter yield < count, try to fill gap with Google
+                    if len(all_tweets) < count:
+                        shortfall = count - len(all_tweets)
+                        logging.info(f"  ⚠️ Yield Warning: Got {len(all_tweets)}/{count} from Twitter. Attempting Google fallback for {shortfall} items...")
+                        update_job_status(parent_job_id, 'RUNNING', f"Scraping Google for {shortfall} items to meet target...")
                         
-                        # Update job status
-                        update_job_status(parent_job_id, 'RUNNING', f'Completed {completed_items[0]+1}/{total_work}, {len(all_tweets)} tweets collected')
+                        try:
+                            # Iteratively search Google with different variations until target met
+                            # Priority: Base keyword -> Hashtag -> Variations
+                            # We use 'variations' list which already contains ["keyword", "#keyword", ...]
+                            
+                            for fallback_kw in variations:
+                                if len(all_tweets) >= count:
+                                    break # Target reached!
+                                
+                                current_shortfall = count - len(all_tweets)
+                                logging.info(f"  🔎 [Google] Searching for: '{fallback_kw}' (Need {current_shortfall} more)")
+                                
+                                # Scrape Google (limit to current shortfall or 100 per kw to be safe)
+                                # We request slightly more than needed to account for dedup
+                                target_for_this_kw = min(current_shortfall + 20, 150)
+                                google_results = google_scraper.scrape(fallback_kw, count=target_for_this_kw)
+                                
+                                new_from_google = 0
+                                with data_lock:
+                                    for item in google_results:
+                                        link = item.get('url') # CORRECTED KEY: 'url' not 'link'
+                                        if link and link not in seen_urls:
+                                            seen_urls.add(link)
+                                            all_tweets.append(item)
+                                            new_from_google += 1
+                                            
+                                logging.info(f"  ✅ [Google] '{fallback_kw}' yielded {new_from_google} unique items.")
+                                
+                                # Small delay between Google queries to avoid rapid-fire detection
+                                time.sleep(3)
+
+                        except Exception as e:
+                            logging.error(f"  ❌ [Google] Fallback failed: {e}")
+
+                    # Save merged results
+                    if all_tweets:
+                        timestamp = int(datetime.now().timestamp())
+                        clean_kw = "".join([c if c.isalnum() else "_" for c in base_keyword])[:50]
+                        output_filename = f"{OUTPUT_DIR}/autoexpand_{clean_kw}_{timestamp}.csv"
                         
-                        # EARLY STOP: Check if safety cap reached (only in capped mode)
-                        if not unlimited_mode and len(all_tweets) >= safety_cap:
-                            logging.info(f"  🛑 Safety cap reached ({safety_cap} tweets), stopping early!")
-                            # Cancel remaining futures
-                            for f in futures:
-                                f.cancel()
-                            break
+                        # Write CSV (Handle Mixed Keys from Multi-Platform)
+                        os.makedirs(OUTPUT_DIR, exist_ok=True)
                         
-                        # Save checkpoint periodically (every 5 completions)
-                        if completed_items[0] % 5 == 0:
-                            with data_lock:
-                                save_checkpoint(parent_job_id, {
-                                    'base_keyword': base_keyword,
-                                    'variations': variations,
-                                    'date_chunks': date_chunks,
-                                    'all_tweets': all_tweets,
-                                    'seen_urls': list(seen_urls),
-                                    'current_chunk_idx': completed_items[0],
-                                    'total_chunks': total_work,
-                                    'start_date': start_date,
-                                    'end_date': end_date,
-                                    'worker_mode': worker_mode  # Added for resume
-                                })
+                        # Gather all possible keys dynamically
+                        keys = set()
+                        for t in all_tweets:
+                            keys.update(t.keys())
+                        fieldnames = sorted(list(keys))
+                        
+                        with open(output_filename, 'w', newline='', encoding='utf-8') as f:
+                            writer = csv.DictWriter(f, fieldnames=fieldnames)
+                            writer.writeheader()
+                            writer.writerows(all_tweets)
+                        
+                        # Update parent job as COMPLETED
+                        filename = os.path.basename(output_filename)
+                        update_job_status(parent_job_id, 'COMPLETED', f'Found {len(all_tweets)} unique tweets (from {len(variations)} keywords)', filename)
+                        delete_checkpoint(parent_job_id)  # Clean up checkpoint
+                        print(f"🎉 Auto-Expand complete: {len(all_tweets)} tweets saved to {output_filename}")
+                    else:
+                        update_job_status(parent_job_id, 'FAILED', 'No tweets found', None)
+                        delete_checkpoint(parent_job_id)  # Clean up checkpoint
             
-            # Save merged results
-            if all_tweets:
-                timestamp = int(datetime.now().timestamp())
-                clean_kw = "".join([c if c.isalnum() else "_" for c in base_keyword])[:50]
-                output_filename = f"{OUTPUT_DIR}/autoexpand_{clean_kw}_{timestamp}.csv"
-                
-                # Write CSV
-                os.makedirs(OUTPUT_DIR, exist_ok=True)
-                keys = all_tweets[0].keys()
-                with open(output_filename, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.DictWriter(f, fieldnames=keys)
-                    writer.writeheader()
-                    writer.writerows(all_tweets)
-                
-                # Update parent job as COMPLETED
-                filename = os.path.basename(output_filename)
-                update_job_status(parent_job_id, 'COMPLETED', f'Found {len(all_tweets)} unique tweets (from {len(variations)} keywords)', filename)
-                delete_checkpoint(parent_job_id)  # Clean up checkpoint
-                print(f"🎉 Auto-Expand complete: {len(all_tweets)} tweets saved to {output_filename}")
-                # Keep job visible for 30s then remove
-                time.sleep(30)
-                remove_job(parent_job_id)
-            else:
-                update_job_status(parent_job_id, 'FAILED', 'No tweets found', None)
-                delete_checkpoint(parent_job_id)  # Clean up checkpoint
-                time.sleep(10)
-                remove_job(parent_job_id)
+                except Exception as batch_e:
+                    logging.error(f"❌ Batch processing failed: {batch_e}")
+                    update_job_status(parent_job_id, 'FAILED', f'System Error: {str(batch_e)}', None)
         
         # Start the batch thread
         thread = threading.Thread(target=run_auto_expand_batch)
@@ -899,17 +1021,12 @@ def create_job():
         job_id = str(uuid.uuid4())
         
         # Save to DB
-        conn = get_db()
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO jobs (id, keyword, target_count, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)",
-            (job_id, combined_keyword, count, 'PENDING', datetime.now(), 'Queued...')
-        )
-        conn.commit()
-        conn.close()
+        # Save to In-Memory Store
+        add_job(job_id, combined_keyword, count, worker_mode)
+        update_job_status(job_id, 'PENDING', 'Queued...')
         
         # Start background thread
-        thread = threading.Thread(target=run_scraper_thread, args=(job_id, combined_keyword, count, start_date, end_date, smart_mode, worker_mode, None))
+        thread = threading.Thread(target=run_scraper_thread, args=(job_id, combined_keyword, count, start_date, end_date, smart_mode, worker_mode, None, is_cancelled))
         thread.daemon = True
         thread.start()
         
@@ -925,7 +1042,7 @@ def list_jobs():
 @app.route('/api/health-check', methods=['GET'])
 def health_check():
     """Run account health check and return status"""
-    result = scraper_selenium.check_account_health()
+    result = twitter_scraper.health_check()
     return jsonify(result)
 
 @app.route('/api/logs', methods=['GET'])
@@ -973,6 +1090,17 @@ def resume_job(job_id):
         'keyword': base_keyword,
         'message': f'Job resuming from checkpoint'
     })
+
+@app.route('/api/jobs/<job_id>/cancel', methods=['POST'])
+def cancel_job_endpoint(job_id):
+    """Cancel a running job"""
+    # Import here to avoid circular imports? No, job_store is already imported
+    from services.job_store import cancel_job
+    
+    if cancel_job(job_id):
+        return jsonify({'status': 'success', 'message': f'Job {job_id} cancellation requested'})
+    else:
+        return jsonify({'error': 'Job not found'}), 404
 
 @app.route('/api/preview/<job_id>', methods=['GET'])
 def preview_data(job_id):

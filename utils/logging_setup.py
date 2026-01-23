@@ -65,8 +65,9 @@ def setup_logging():
         datefmt='%Y-%m-%d %H:%M:%S'
     ))
     
-    # Console handler
-    console_handler = logging.StreamHandler()
+    # Console handler (force stdout)
+    import sys
+    console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(log_level)
     console_handler.setFormatter(logging.Formatter('%(message)s'))
     

@@ -9,3 +9,8 @@ cookies_config.json
 jobs.db
 outputs/
 *.log
+*.html
+chunked_*.csv
+temp_*.csv
+debug_*.json
+last_*.html

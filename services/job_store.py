@@ -31,7 +31,8 @@ def add_job(job_id, keyword, target_count, worker_mode=3):
             'progress': 'Starting...',
             'result_file': None,
             'created_at': datetime.now().isoformat(),
-            'worker_mode': worker_mode
+            'worker_mode': worker_mode,
+            'cancel_requested': False
         }
     logging.info(f"📝 Job added: {job_id} ({keyword})")
 
@@ -107,12 +108,33 @@ def job_exists(job_id):
         return job_id in JOBS
 
 
-def get_job_count():
+
+def cancel_job(job_id):
     """
-    Get total number of active jobs.
+    Mark a job as cancelled.
     
-    Returns:
-        int: Number of jobs
+    Args:
+        job_id: Job identifier
     """
     with JOBS_LOCK:
-        return len(JOBS)
+        if job_id in JOBS:
+            JOBS[job_id]['cancel_requested'] = True
+            JOBS[job_id]['status'] = 'CANCELLING'
+            logging.info(f"🛑 Job cancellation requested: {job_id}")
+            return True
+        return False
+
+
+def is_cancelled(job_id):
+    """
+    Check if a job has been requested to cancel.
+    
+    Args:
+        job_id: Job identifier
+        
+    Returns:
+        bool: True if cancellation requested
+    """
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        return job.get('cancel_requested', False) if job else False

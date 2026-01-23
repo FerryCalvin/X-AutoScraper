@@ -7,17 +7,17 @@
 scraper:
   # Default tweet count if not specified
   default_count: 100
-  
+
   # Delay between scrolls (seconds) - helps avoid detection
   scroll_delay_min: 1.5
   scroll_delay_max: 4.0
-  
+
   # Maximum scroll attempts before giving up
   max_scroll_attempts: 30
-  
+
   # Coffee break every N tweets (safety pause)
-  coffee_break_interval: 100
-  coffee_break_duration: 10  # seconds
+  coffee_break_interval: 75
+  coffee_break_duration: 12 # seconds
 
 # ===================
 # WORKER SETTINGS
@@ -25,7 +25,7 @@ scraper:
 workers:
   # Default worker mode: 1=Safe, 3=Normal, 5=Aggressive
   default_mode: 3
-  
+
   # Threshold to switch to parallel mode
   parallel_threshold: 500
 
@@ -35,10 +35,10 @@ workers:
 chunking:
   # Enable auto-chunking for long date ranges
   enabled: true
-  
+
   # Chunk size in days
   chunk_days: 7
-  
+
   # Minimum range (days) to trigger chunking
   min_range_for_chunking: 7
 
@@ -48,10 +48,10 @@ chunking:
 rate_limit:
   # Max requests per minute (for rate limit meter)
   max_requests_per_minute: 30
-  
+
   # Warning threshold (yellow zone)
   warning_threshold: 20
-  
+
   # Danger threshold (red zone)
   danger_threshold: 25
 
@@ -61,16 +61,16 @@ rate_limit:
 logging:
   # Enable file logging
   enabled: true
-  
+
   # Log file path
   file: "logs/autoscraper.log"
-  
+
   # Log level: DEBUG, INFO, WARNING, ERROR
   level: "INFO"
-  
+
   # Max log file size (MB) before rotation
   max_size_mb: 10
-  
+
   # Number of backup files to keep
   backup_count: 5
 
@@ -80,10 +80,10 @@ logging:
 output:
   # Default output directory
   directory: "outputs"
-  
+
   # Default format: csv, json, both
   format: "csv"
-  
+
   # Include cleaned text column
   include_clean_text: true
 
@@ -93,10 +93,10 @@ output:
 sentiment:
   # Enable sentiment analysis
   enabled: false
-  
+
   # Model to use: lexicon, indobert
   model: "indobert"
-  
+
   # Batch size for processing
   batch_size: 32
 
@@ -106,9 +106,9 @@ sentiment:
 topics:
   # Enable topic modeling
   enabled: false
-  
+
   # Number of topics to extract
   num_topics: 5
-  
+
   # Words per topic
   words_per_topic: 10

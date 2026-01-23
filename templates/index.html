@@ -259,6 +259,26 @@
             }
         }
 
+        async function cancelJob(jobId) {
+            if (!confirm('Are you sure you want to stop this job?')) return;
+            
+            try {
+                const response = await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+                const result = await response.json();
+                
+                if (response.ok) {
+                    // Update UI immediately (optimistic)
+                    fetchJobs();
+                    alert('Job cancellation requested. It may take a moment to stop completely.');
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (error) {
+                console.error("Error cancelling job:", error);
+                alert('Connection failed');
+            }
+        }
+
         function renderJobs(jobs) {
             const tbody = document.getElementById('job-list');
             if (jobs.length === 0) {
@@ -321,12 +341,17 @@
                     })()}
                         </td>
                         <td class="px-6 py-4 text-right">
-                            ${job.status === 'COMPLETED' ?
-                        `<a href="/download/${filename}" class="text-blue-600 hover:text-blue-800 font-medium text-sm flex items-center space-x-1">
+                            ${job.status === 'RUNNING' ? 
+                                `<button onclick="cancelJob('${job.id}')" class="text-red-500 hover:text-red-700 font-medium text-xs flex items-center space-x-1 border border-red-200 px-2 py-1 rounded bg-red-50 hover:bg-red-100 transition">
+                                    <i class="fa-solid fa-stop"></i>
+                                    <span>Cancel</span>
+                                </button>` : 
+                                (job.status === 'COMPLETED' ?
+                                `<a href="/download/${filename}" class="text-blue-600 hover:text-blue-800 font-medium text-sm flex items-center space-x-1">
                                     <i class="fa-solid fa-download"></i>
                                     <span>Download</span>
                                 </a>` :
-                        '<span class="text-gray-300">-</span>'
+                            '<span class="text-gray-300">-</span>')
                     }
                         </td>
                     </tr>
